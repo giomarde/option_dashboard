@@ -228,22 +228,21 @@ class CSVDataFeedProvider(DataFeedProvider):
         raise ValueError(f"No data found for {ticker} in {csv_path}")
     
     def fetch_forward_curve(self, base_ticker: str, num_months: int = 12,
-                           curve_date: Optional[Union[str, date, datetime]] = None) -> pd.DataFrame:
+                        curve_date: Optional[Union[str, date, datetime]] = None) -> pd.DataFrame:
         """
         Fetch forward curve for a base ticker from CSV
         
         Args:
             base_ticker: The base ticker symbol
             num_months: Number of months to fetch in the forward curve
-            curve_date: The date for which to fetch the forward curve
-            
+            curve_date: The pricing date - we'll look for the most recent data before this date
+                
         Returns:
             pd.DataFrame: A dataframe with forward curve data
         """
-        if curve_date is None:
-            curve_date = datetime.now().strftime('%Y-%m-%d')
+        pricing_date = datetime.now() if curve_date is None else pd.to_datetime(curve_date)
         
-        logger.info(f"Fetching forward curve for {base_ticker} on {curve_date}")
+        logger.info(f"Fetching forward curve for {base_ticker} using most recent data before {pricing_date}")
         
         fwd_data = {}
         
@@ -255,18 +254,23 @@ class CSVDataFeedProvider(DataFeedProvider):
                 fc_df = pd.read_csv(fc_path)
                 if 'DATE' in fc_df.columns:
                     fc_df['DATE'] = pd.to_datetime(fc_df['DATE'])
-                    date_dt = pd.to_datetime(curve_date)
-                    closest_idx = (fc_df['DATE'] - date_dt).abs().idxmin()
-                    row = fc_df.iloc[closest_idx]
                     
-                    for i in range(1, num_months + 1):
-                        month_code = f"M{i:02d}"
-                        if month_code in row:
-                            fwd_data[month_code] = row[month_code]
-                            
-                    if fwd_data:
-                        logger.info(f"Successfully loaded forward curve data: {len(fwd_data)} months")
-                        return pd.DataFrame([fwd_data], index=[curve_date])
+                    # Filter to dates before or equal to pricing_date
+                    fc_df = fc_df[fc_df['DATE'] <= pricing_date]
+                    
+                    if len(fc_df) > 0:
+                        # Get the most recent date in the filtered data
+                        most_recent_date = fc_df['DATE'].max()
+                        most_recent_row = fc_df[fc_df['DATE'] == most_recent_date].iloc[0]
+                        
+                        for i in range(1, num_months + 1):
+                            month_code = f"M{i:02d}"
+                            if month_code in most_recent_row:
+                                fwd_data[month_code] = most_recent_row[month_code]
+                                
+                        if fwd_data:
+                            logger.info(f"Successfully loaded forward curve data: {len(fwd_data)} months from {most_recent_date}")
+                            return pd.DataFrame([fwd_data], index=[most_recent_date])
             except Exception as e:
                 logger.error(f"Forward curve CSV failed: {e}")
         
@@ -299,36 +303,59 @@ class CSVDataFeedProvider(DataFeedProvider):
         
         Args:
             ticker: The ticker symbol
-            date: The date for which to fetch market data (None for latest)
-            
+            date: The pricing date - we'll look for the most recent data before this date
+                
         Returns:
             Dict: A dictionary with market data (price, last_updated)
         """
-        if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
-            
+        pricing_date = datetime.now() if date is None else pd.to_datetime(date)
+        
         try:
-            # Try to get the latest price for the ticker
-            end_date = pd.to_datetime(date)
-            start_date = end_date - timedelta(days=7)  # Look back a week if needed
+            # Look for the CSV file
+            base_ticker = self._get_base_ticker(ticker)
+            csv_path = os.path.join(self.data_folder, f"{base_ticker}.csv")
             
-            price_series = self.fetch_data(ticker, start_date, end_date, verbose=False)
-            if isinstance(price_series, pd.Series) and not price_series.empty:
-                price = price_series.iloc[-1]
-                last_updated = price_series.index[-1].strftime('%Y-%m-%d')
-                
-                return {
-                    "price": float(price),
-                    "lastUpdated": last_updated
-                }
+            if os.path.exists(csv_path):
+                # Load the CSV and find the most recent date before pricing_date
+                df = pd.read_csv(csv_path)
+                if 'DATE' in df.columns:
+                    df['DATE'] = pd.to_datetime(df['DATE'])
+                    
+                    # Filter to dates before or equal to pricing_date
+                    df = df[df['DATE'] <= pricing_date]
+                    
+                    if len(df) > 0:
+                        # Get the most recent date in the filtered data
+                        most_recent_date = df['DATE'].max()
+                        recent_data = df[df['DATE'] == most_recent_date]
+                        
+                        # Convert ticker to the new ID format for filtering
+                        expected_id = self._convert_to_new_id_format(ticker)
+                        
+                        if 'ID' in recent_data.columns:
+                            recent_data = recent_data[recent_data['ID'] == expected_id]
+                            
+                            if len(recent_data) > 0 and 'PRICE' in recent_data.columns:
+                                price = recent_data['PRICE'].iloc[0]
+                                return {
+                                    "price": float(price),
+                                    "lastUpdated": most_recent_date.strftime('%Y-%m-%d')
+                                }
+            
+            logger.warning(f"No historical data found for {ticker} before {pricing_date}, using default price")
+            # Fallback to default values
+            return {
+                "price": 10.0,
+                "lastUpdated": pricing_date.strftime('%Y-%m-%d')
+            }
+                    
         except Exception as e:
             logger.error(f"Error fetching market data for {ticker}: {e}")
-        
-        # If we can't get real data, return a placeholder
-        return {
-            "price": 0.0,
-            "lastUpdated": datetime.now().strftime('%Y-%m-%d')
-        }
+            # If we can't get real data, return a placeholder
+            return {
+                "price": 10.0,
+                "lastUpdated": pricing_date.strftime('%Y-%m-%d')
+            }
     
     def fetch_volatility_surface(self, primary_ticker: str, secondary_ticker: Optional[str] = None,
                                date: Optional[Union[str, date, datetime]] = None) -> Dict:

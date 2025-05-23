@@ -1,5 +1,5 @@
 """
-Volatility model implementation.
+Volatility model implementation with improved error handling.
 """
 
 import numpy as np
@@ -33,6 +33,16 @@ class VolatilityModel:
             "theta": 0.04,  # Long-run variance
             "sigma": 0.3,   # Vol of vol
             "rho": -0.7     # Correlation
+        }
+        
+        # Default volatilities to use when historical data is not available
+        self.default_volatilities = {
+            'THE': 0.35,
+            'TFU': 0.32,
+            'JKM': 0.40,
+            'DES': 0.38,
+            'NBP': 0.33,
+            'HH': 0.45,
         }
     
     def calculate_volatility(self, indices: List[str], 
@@ -89,7 +99,7 @@ class VolatilityModel:
         individual_vols = {}
         for index in indices:
             individual_vols[index] = self.estimate_volatility(
-                historical_data[index], delivery_date)
+                historical_data[index], delivery_date, index=index)
         
         # Calculate spread volatilities for all pairs
         spread_vols = {}
@@ -101,7 +111,9 @@ class VolatilityModel:
                         spread_vols[spread_name] = self.estimate_spread_volatility(
                             historical_data[index1], 
                             historical_data[index2],
-                            delivery_date
+                            delivery_date,
+                            index1=index1,
+                            index2=index2
                         )
         
         return {
@@ -111,7 +123,8 @@ class VolatilityModel:
     
     def estimate_volatility(self, price_series: pd.Series, 
                            delivery_date: datetime,
-                           annualize: bool = True) -> float:
+                           annualize: bool = True,
+                           index: str = None) -> float:
         """
         Estimate volatility for a single index.
         
@@ -119,12 +132,17 @@ class VolatilityModel:
             price_series: Historical price series
             delivery_date: Delivery date
             annualize: Whether to annualize the volatility
+            index: The index name (for fallback defaults)
             
         Returns:
             Estimated volatility
         """
+        # Check if we have enough data
         if price_series is None or len(price_series) < 2:
-            logger.warning("Insufficient data for volatility calculation, using default")
+            logger.warning(f"Insufficient data for volatility calculation for {index}, using default")
+            # Use default volatility if index is provided, otherwise use a general default
+            if index and index in self.default_volatilities:
+                return self.default_volatilities[index]
             return 0.3  # Default volatility
         
         try:
@@ -133,10 +151,35 @@ class VolatilityModel:
             
             # Calculate log returns (for Black-Scholes) or price changes (for Bachelier)
             # Here we're using log returns as a general approach
-            returns = np.log(price_series / price_series.shift(1)).dropna()
-            
-            # Calculate volatility
-            vol = returns.std()
+            # First check if there are any non-positive values
+            if (price_series <= 0).any():
+                # Use price changes instead of log returns for Bachelier model
+                returns = price_series.diff().dropna()
+                
+                # Use absolute values for volatility calculation
+                if returns.abs().mean() > 0:
+                    vol = returns.std() / returns.abs().mean()
+                else:
+                    # Fallback if mean is zero
+                    vol = returns.std()
+                    if vol == 0:
+                        logger.warning(f"Zero standard deviation for {index}, using default")
+                        if index and index in self.default_volatilities:
+                            return self.default_volatilities[index]
+                        return 0.3
+            else:
+                # Use log returns for Black-Scholes style calculation
+                returns = np.log(price_series / price_series.shift(1)).dropna()
+                
+                # Calculate volatility
+                vol = returns.std()
+                
+                # If volatility is zero or nan, use default
+                if vol == 0 or np.isnan(vol):
+                    logger.warning(f"Zero or NaN volatility for {index}, using default")
+                    if index and index in self.default_volatilities:
+                        return self.default_volatilities[index]
+                    return 0.3
             
             # Annualize if requested (assuming 252 trading days)
             if annualize:
@@ -162,21 +205,28 @@ class VolatilityModel:
             days_to_delivery = (delivery_date - datetime.now()).days
             if days_to_delivery > 0:
                 time_to_maturity = days_to_delivery / 365
-                term_factor = np.sqrt((1 - np.exp(-2 * 0.5 * time_to_maturity)) / (2 * 0.5 * time_to_maturity))
-                vol = vol * term_factor
+                # Avoid division by zero
+                if time_to_maturity > 0:
+                    term_factor = np.sqrt((1 - np.exp(-2 * 0.5 * time_to_maturity)) / (2 * 0.5 * time_to_maturity))
+                    vol = vol * term_factor
             
             # Cap the volatility to reasonable levels
             vol = min(max(0.1, vol), 0.8)
             
             return vol
         except Exception as e:
-            logger.error(f"Error calculating volatility: {e}")
+            logger.error(f"Error calculating volatility for {index}: {e}")
+            # Use default volatility if index is provided, otherwise use a general default
+            if index and index in self.default_volatilities:
+                return self.default_volatilities[index]
             return 0.3  # Default fallback volatility
     
     def estimate_spread_volatility(self, price_series1: pd.Series, 
                                   price_series2: pd.Series,
                                   delivery_date: datetime,
-                                  correlation: Optional[float] = None) -> float:
+                                  correlation: Optional[float] = None,
+                                  index1: str = None,
+                                  index2: str = None) -> float:
         """
         Estimate volatility for a spread between two indices.
         
@@ -185,13 +235,31 @@ class VolatilityModel:
             price_series2: Historical price series for second index
             delivery_date: Delivery date
             correlation: Optional correlation override
+            index1: The first index name (for fallback defaults)
+            index2: The second index name (for fallback defaults)
             
         Returns:
             Estimated spread volatility
         """
+        # Get individual volatilities with fallback
+        vol1 = self.estimate_volatility(price_series1, delivery_date, index=index1)
+        vol2 = self.estimate_volatility(price_series2, delivery_date, index=index2)
+        
+        # Check if we have enough data for both series
         if price_series1 is None or price_series2 is None or len(price_series1) < 2 or len(price_series2) < 2:
-            logger.warning("Insufficient data for spread volatility calculation, using default")
-            return 0.3  # Default volatility
+            logger.warning(f"Insufficient data for spread volatility calculation between {index1} and {index2}, using individual vols")
+            
+            # If correlation is not provided, use a default value
+            if correlation is None:
+                correlation = 0.7  # Default high correlation for energy markets
+            
+            # Calculate spread volatility using individual volatilities and correlation
+            spread_vol = np.sqrt(vol1**2 + vol2**2 - 2 * correlation * vol1 * vol2)
+            
+            # Cap the volatility to reasonable levels
+            spread_vol = min(max(0.1, spread_vol), 0.8)
+            
+            return spread_vol
         
         try:
             # Make sure the series are sorted
@@ -206,8 +274,19 @@ class VolatilityModel:
             combined = combined.dropna()
             
             if len(combined) < 2:
-                logger.warning("Insufficient aligned data for spread volatility calculation, using default")
-                return 0.3  # Default volatility
+                logger.warning(f"Insufficient aligned data for spread volatility calculation between {index1} and {index2}, using individual vols")
+                
+                # If correlation is not provided, use a default value
+                if correlation is None:
+                    correlation = 0.7  # Default high correlation for energy markets
+                
+                # Calculate spread volatility using individual volatilities and correlation
+                spread_vol = np.sqrt(vol1**2 + vol2**2 - 2 * correlation * vol1 * vol2)
+                
+                # Cap the volatility to reasonable levels
+                spread_vol = min(max(0.1, spread_vol), 0.8)
+                
+                return spread_vol
             
             # Calculate the spread
             spread = combined['asset1'] - combined['asset2']
@@ -216,15 +295,50 @@ class VolatilityModel:
             vol_direct = self.estimate_volatility(spread, delivery_date)
             
             # Method 2: Calculate from individual volatilities and correlation
-            returns1 = np.log(combined['asset1'] / combined['asset1'].shift(1)).dropna()
-            returns2 = np.log(combined['asset2'] / combined['asset2'].shift(1)).dropna()
+            # Check for non-positive values before taking log
+            if (combined['asset1'] <= 0).any() or (combined['asset2'] <= 0).any():
+                # Use price changes
+                returns1 = combined['asset1'].diff().dropna()
+                returns2 = combined['asset2'].diff().dropna()
+                
+                if len(returns1) > 0 and len(returns2) > 0:
+                    # Normalize by mean absolute value to get something like volatility
+                    if returns1.abs().mean() > 0:
+                        vol1 = returns1.std() / returns1.abs().mean()
+                    else:
+                        vol1 = returns1.std()
+                        
+                    if returns2.abs().mean() > 0:
+                        vol2 = returns2.std() / returns2.abs().mean()
+                    else:
+                        vol2 = returns2.std()
+                    
+                    # Annualize
+                    vol1 = vol1 * np.sqrt(252)
+                    vol2 = vol2 * np.sqrt(252)
+                    
+                    # Calculate correlation
+                    if correlation is None:
+                        # Check for constant series
+                        if returns1.std() > 0 and returns2.std() > 0:
+                            correlation = returns1.corr(returns2)
+                        else:
+                            correlation = 0.0
+                else:
+                    # Fallback to default correlation
+                    correlation = 0.7
+            else:
+                # Use log returns
+                returns1 = np.log(combined['asset1'] / combined['asset1'].shift(1)).dropna()
+                returns2 = np.log(combined['asset2'] / combined['asset2'].shift(1)).dropna()
+                
+                vol1 = returns1.std() * np.sqrt(252)
+                vol2 = returns2.std() * np.sqrt(252)
+                
+                if correlation is None:
+                    correlation = returns1.corr(returns2)
             
-            vol1 = returns1.std() * np.sqrt(252)
-            vol2 = returns2.std() * np.sqrt(252)
-            
-            if correlation is None:
-                correlation = returns1.corr(returns2)
-            
+            # Calculate volatility from individual components
             vol_from_components = np.sqrt(vol1**2 + vol2**2 - 2 * correlation * vol1 * vol2)
             
             # Blend the two methods
@@ -251,8 +365,19 @@ class VolatilityModel:
             
             return spread_vol
         except Exception as e:
-            logger.error(f"Error calculating spread volatility: {e}")
-            return 0.3  # Default fallback volatility
+            logger.error(f"Error calculating spread volatility between {index1} and {index2}: {e}")
+            
+            # If correlation is not provided, use a default value
+            if correlation is None:
+                correlation = 0.7  # Default high correlation for energy markets
+            
+            # Calculate spread volatility using individual volatilities and correlation
+            spread_vol = np.sqrt(vol1**2 + vol2**2 - 2 * correlation * vol1 * vol2)
+            
+            # Cap the volatility to reasonable levels
+            spread_vol = min(max(0.1, spread_vol), 0.8)
+            
+            return spread_vol
     
     def generate_volatility_smile(self, base_vol: float, 
                                  base_price: float,
@@ -268,6 +393,11 @@ class VolatilityModel:
         Returns:
             List of dictionaries with strike and volatility pairs
         """
+        # Safety check for base_price
+        if base_price == 0:
+            logger.warning("Base price is zero, using default value of 1.0")
+            base_price = 1.0
+        
         if strikes is None:
             # Generate strikes around the base price
             range_pct = 0.2  # 20% range around base price
@@ -333,6 +463,12 @@ class VolatilityModel:
         
         # Generate volatility smiles
         result = {}
+        
+        # Safety check for base_prices
+        for index, price in base_prices.items():
+            if price == 0:
+                logger.warning(f"Base price for {index} is zero, using default value of 1.0")
+                base_prices[index] = 1.0
         
         # Individual indices
         for index, vol in vols['individual'].items():

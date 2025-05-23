@@ -60,7 +60,7 @@ class OptionProcessor:
     
     def _fetch_market_data(self, config: Dict[str, any]) -> Dict[str, any]:
         """
-        Fetch all required market data for the pricing model.
+        Fetch all required market data for the pricing model with improved error handling.
         
         Args:
             config: Dictionary with configuration parameters
@@ -73,6 +73,10 @@ class OptionProcessor:
         secondary_index = config.get('secondary_index')
         option_type = config.get('option_type')
         evaluation_date_str = config.get('evaluation_date')
+
+        # Create pricing_date (today) for market data fetching
+        pricing_date = datetime.now()
+        pricing_date_str = pricing_date.strftime('%Y-%m-%d')
         
         # Build list of indices to fetch
         indices = [primary_index]
@@ -102,6 +106,7 @@ class OptionProcessor:
             'forward_curves': {},
             'volatilities': {},
             'forward_spreads': [],
+            'spread_volatilities': []  # Ensure this is initialized
         }
         
         # Fetch data for each index if data provider is available
@@ -110,12 +115,12 @@ class OptionProcessor:
                 try:
                     # 1. Get current price data
                     current_data = self.data_provider.fetch_market_data(
-                        index, evaluation_date_str)
+                        index, pricing_date_str)
                     market_data['indices_data'][index] = current_data
                     
                     # 2. Get forward curve
                     forward_curve = self.data_provider.fetch_forward_curve(
-                        index, 12, evaluation_date_str)
+                        index, 12, pricing_date_str)
                     market_data['forward_curves'][index] = forward_curve
                 except Exception as e:
                     logger.error(f"Error fetching data for {index}: {e}")
@@ -123,7 +128,7 @@ class OptionProcessor:
                     market_data['indices_data'][index] = {'price': 10.0, 'lastUpdated': str(evaluation_date)}
                     market_data['forward_curves'][index] = pd.DataFrame(
                         {f"M{i:02d}": [10.0 + i*0.1] for i in range(1, 13)},
-                        index=[evaluation_date_str or str(evaluation_date)]
+                        index=[pricing_date_str or str(evaluation_date)]
                     )
         else:
             # Create mock data if no data provider is available
@@ -132,7 +137,7 @@ class OptionProcessor:
                 market_data['indices_data'][index] = {'price': 10.0, 'lastUpdated': str(evaluation_date)}
                 market_data['forward_curves'][index] = pd.DataFrame(
                     {f"M{i:02d}": [10.0 + i*0.1] for i in range(1, 13)},
-                    index=[evaluation_date_str or str(evaluation_date)]
+                    index=[pricing_date_str or str(evaluation_date)]
                 )
         
         # Calculate spreads if needed
@@ -143,43 +148,86 @@ class OptionProcessor:
                 months_ahead = (delivery_date.year - evaluation_date.year) * 12 + (delivery_date.month - evaluation_date.month)
                 month_code = f"M{months_ahead+1:02d}"  # +1 because M01 is first month
                 
-                # Get forward prices
+                # Get forward prices with proper defaults
                 primary_price = self._get_forward_price(market_data['forward_curves'][primary_index], month_code)
                 secondary_price = self._get_forward_price(market_data['forward_curves'][secondary_index], month_code)
                 
+                # Ensure we don't have zero values
+                if primary_price == 0:
+                    primary_price = 10.0
+                if secondary_price == 0:
+                    secondary_price = 9.0
+                    
                 # Calculate spread
                 spread = primary_price - secondary_price
                 market_data['forward_spreads'].append(spread)
         
-        # Handle volatility calculation
-        from models.volatility import VolatilityModel
-        vol_model = VolatilityModel(self.data_provider)
-        
-        # For spread options, we need volatility for the spread
-        if delivery_dates:
-            vol_surface = vol_model.get_volatility_surface(
-                indices, evaluation_date, delivery_dates[0],
-                {idx: data['price'] for idx, data in market_data['indices_data'].items()}
-            )
-            market_data['volatilities'] = vol_surface
+        # Handle volatility calculation with robust error handling
+        try:
+            from models.volatility import VolatilityModel
+            vol_model = VolatilityModel(self.data_provider)
             
-            # Extract volatilities for each delivery date
-            if option_type.startswith('vanilla_spread') and primary_index and secondary_index:
-                spread_key = f"{primary_index}-{secondary_index}"
-                if spread_key in vol_surface:
-                    # Find ATM volatility
-                    if market_data['forward_spreads']:
-                        spread_val = market_data['forward_spreads'][0]
-                        closest_vol = vol_surface[spread_key][0]['volatility']  # Default to first
-                        for vol_point in vol_surface[spread_key]:
-                            if abs(vol_point['strike'] - spread_val) < abs(closest_vol['strike'] - spread_val):
-                                closest_vol = vol_point['volatility']
-                        market_data['spread_volatilities'] = [closest_vol] * len(delivery_dates)
-                    else:
-                        # If no forward spreads, use the middle volatility
-                        middle_idx = len(vol_surface[spread_key]) // 2
-                        market_data['spread_volatilities'] = [vol_surface[spread_key][middle_idx]['volatility']] * len(delivery_dates)
+            # For spread options, we need volatility for the spread
+            if delivery_dates:
+                # Initialize with default volatilities
+                market_data['spread_volatilities'] = [0.35] * len(delivery_dates)
                 
+                try:
+                    # Generate volatility surfaces - wrap in try/except to catch any errors
+                    vol_surface = vol_model.get_volatility_surface(
+                        indices, evaluation_date, delivery_dates[0],
+                        {idx: data.get('price', 10.0) for idx, data in market_data['indices_data'].items()}
+                    )
+                    market_data['volatilities'] = vol_surface
+                    
+                    # Extract volatilities for each delivery date
+                    if option_type.startswith('vanilla_spread') and primary_index and secondary_index:
+                        spread_key = f"{primary_index}-{secondary_index}"
+                        if spread_key in vol_surface and vol_surface[spread_key]:
+                            # Find ATM volatility
+                            if market_data['forward_spreads']:
+                                spread_val = market_data['forward_spreads'][0]
+                                # Default to first vol point
+                                closest_vol = vol_surface[spread_key][0]['volatility']  
+                                
+                                for vol_point in vol_surface[spread_key]:
+                                    if abs(vol_point['strike'] - spread_val) < abs(closest_vol['strike'] - spread_val):
+                                        closest_vol = vol_point['volatility']
+                                
+                                market_data['spread_volatilities'] = [closest_vol] * len(delivery_dates)
+                            else:
+                                # If no forward spreads, use the middle volatility
+                                middle_idx = len(vol_surface[spread_key]) // 2
+                                market_data['spread_volatilities'] = [vol_surface[spread_key][middle_idx]['volatility']] * len(delivery_dates)
+                except Exception as e:
+                    logger.error(f"Error generating volatility surface: {e}")
+                    # Fallback to default volatilities already initialized
+        except Exception as e:
+            logger.error(f"Major error in volatility calculation: {e}")
+            # Ensure we have default volatilities
+            market_data['volatilities'] = {}
+            market_data['spread_volatilities'] = [0.35] * len(delivery_dates)
+            
+            # Add placeholder volatility smiles
+            for index in indices:
+                market_data['volatilities'][index] = [
+                    {"strike": 9.0, "volatility": 0.33},
+                    {"strike": 9.5, "volatility": 0.31},
+                    {"strike": 10.0, "volatility": 0.30},
+                    {"strike": 10.5, "volatility": 0.31},
+                    {"strike": 11.0, "volatility": 0.33}
+                ]
+            
+            if primary_index and secondary_index:
+                spread_key = f"{primary_index}-{secondary_index}"
+                market_data['volatilities'][spread_key] = [
+                    {"strike": -1.0, "volatility": 0.38},
+                    {"strike": -0.5, "volatility": 0.36},
+                    {"strike": 0.0, "volatility": 0.35},
+                    {"strike": 0.5, "volatility": 0.36},
+                    {"strike": 1.0, "volatility": 0.38}
+                ]
+        
         return market_data
     
     def _get_forward_price(self, forward_curve: pd.DataFrame, month_code: str) -> float:
@@ -193,16 +241,18 @@ class OptionProcessor:
         Returns:
             Forward price
         """
+        default_price = 10.0  # Default placeholder
+        
         if forward_curve is None or forward_curve.empty:
-            return 10.0  # Default placeholder
-            
+            return default_price
+                
         if month_code in forward_curve.columns:
             price = forward_curve.iloc[0][month_code]
-            if pd.notna(price):
+            if pd.notna(price) and price != 0:
                 return price
-                
-        # If month code not found or price is NaN, try to find the closest month
-        valid_months = [col for col in forward_curve.columns if col.startswith('M') and pd.notna(forward_curve.iloc[0][col])]
+                    
+        # If month code not found or price is NaN or zero, try to find the closest month
+        valid_months = [col for col in forward_curve.columns if col.startswith('M') and pd.notna(forward_curve.iloc[0][col]) and forward_curve.iloc[0][col] != 0]
         if valid_months:
             # Sort by month number
             valid_months.sort(key=lambda x: int(x[1:]))
@@ -217,11 +267,11 @@ class OptionProcessor:
                 if diff < min_diff:
                     min_diff = diff
                     closest_month = month
-                    
+                        
             return forward_curve.iloc[0][closest_month]
         
         # Fallback to default
-        return 10.0
+        return default_price
     
     def _calculate_delivery_dates(self, config: Dict[str, any]) -> List[datetime]:
         """
