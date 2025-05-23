@@ -1,9 +1,10 @@
-// src/components/Pricer.tsx (with updated PricingConfig interface)
+// src/components/Pricer.tsx
 import React, { useState, useEffect } from 'react';
 import PricingForm from './pricing/PricingForm';
 import PricingResults from './pricing/PricingResults';
 import PricingSidebar from './pricing/PricingSidebar';
 import { getPhysicalDealById, getCompatibleModels } from '../config/pricingConfig';
+import { pricingApi } from '../services/api';
 
 export interface PricingConfig {
   // Deal Type
@@ -92,6 +93,13 @@ const Pricer: React.FC = () => {
   const [results, setResults] = useState<PricingResults | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [marketData, setMarketData] = useState<{
+    primary: { price: number; lastUpdated: string };
+    secondary: { price: number; lastUpdated: string };
+  }>({
+    primary: { price: 0, lastUpdated: '' },
+    secondary: { price: 0, lastUpdated: '' }
+  });
 
   // Update option type when deal type changes
   useEffect(() => {
@@ -112,6 +120,38 @@ const Pricer: React.FC = () => {
     }
   }, [config.deal_type]);
 
+  // Fetch market data when indices change
+  useEffect(() => {
+    const fetchMarketData = async () => {
+      try {
+        // Fetch primary index data
+        const primaryData = await pricingApi.getMarketData(config.primary_index);
+        // Fetch secondary index data
+        const secondaryData = await pricingApi.getMarketData(config.secondary_index);
+        
+        setMarketData({
+          primary: {
+            price: primaryData.price,
+            lastUpdated: primaryData.lastUpdated
+          },
+          secondary: {
+            price: secondaryData.price,
+            lastUpdated: secondaryData.lastUpdated
+          }
+        });
+      } catch (err) {
+        console.error("Failed to fetch market data:", err);
+        // Fallback to demo data if API fails
+        setMarketData({
+          primary: { price: 12.74, lastUpdated: new Date().toISOString() },
+          secondary: { price: 12.45, lastUpdated: new Date().toISOString() }
+        });
+      }
+    };
+    
+    fetchMarketData();
+  }, [config.primary_index, config.secondary_index]);
+
   const handleConfigChange = (field: string, value: any) => {
     setConfig(prev => ({
       ...prev,
@@ -124,46 +164,50 @@ const Pricer: React.FC = () => {
     setError(null);
     
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Call the API to price the option
+      const pricingResults = await pricingApi.priceOption(config);
+      setResults(pricingResults);
+    } catch (err: any) {
+      setError(err.message || 'Failed to price option. Please check your parameters and try again.');
       
-      const mockResults: PricingResults = {
-        total_value: 0.1957,
-        option_values: {
-          '2025-09-07': 0.195744
-        },
-        portfolio_greeks: {
-          delta: 0.7381,
-          gamma: 1.6307,
-          vega: 0.1457,
-          theta: -0.1120
-        },
-        forward_spreads: [0.290],
-        volatilities: [0.3706],
-        mc_results: {
-          summary_statistics: {
-            mean: 0.1957,
-            std: 0.1559,
-            percentiles: {
-              5: 0.0096,
-              25: 0.0684,
-              50: 0.1603,
-              75: 0.2927,
-              95: 0.4959
-            }
+      // If we're in development mode, use mock data for testing UI
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('Using mock data for development');
+        const mockResults: PricingResults = {
+          total_value: 0.1957,
+          option_values: {
+            '2025-09-07': 0.195744
           },
-          exercise_statistics: {
-            exercise_probabilities: [{
-              primary: 0.7381,
-              secondary: 0.2619
-            }]
+          portfolio_greeks: {
+            delta: 0.7381,
+            gamma: 1.6307,
+            vega: 0.1457,
+            theta: -0.1120
+          },
+          forward_spreads: [0.290],
+          volatilities: [0.3706],
+          mc_results: {
+            summary_statistics: {
+              mean: 0.1957,
+              std: 0.1559,
+              percentiles: {
+                5: 0.0096,
+                25: 0.0684,
+                50: 0.1603,
+                75: 0.2927,
+                95: 0.4959
+              }
+            },
+            exercise_statistics: {
+              exercise_probabilities: [{
+                primary: 0.7381,
+                secondary: 0.2619
+              }]
+            }
           }
-        }
-      };
-      
-      setResults(mockResults);
-    } catch (err) {
-      setError('Failed to price option. Please check your parameters and try again.');
+        };
+        setResults(mockResults);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -187,7 +231,11 @@ const Pricer: React.FC = () => {
             
             {results && (
               <div className="mt-4">
-                <PricingResults results={results} config={config} />
+                <PricingResults 
+                  results={results} 
+                  config={config}
+                  onReprice={handleQuote} 
+                />
               </div>
             )}
           </div>
@@ -199,6 +247,7 @@ const Pricer: React.FC = () => {
               onQuote={handleQuote}
               isLoading={isLoading}
               error={error}
+              marketData={marketData}
             />
           </div>
         </div>

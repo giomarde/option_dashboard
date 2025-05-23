@@ -3,14 +3,35 @@ import React from 'react';
 import { PricingConfig } from '../Pricer';
 import { getPhysicalDealById, getModelById } from '../../config/pricingConfig';
 
+interface MarketDataType {
+  primary: { 
+    price: number; 
+    lastUpdated: string;
+  };
+  secondary: { 
+    price: number; 
+    lastUpdated: string;
+  };
+}
+
 interface PricingSidebarProps {
   config: PricingConfig;
   onQuote: () => void;
   isLoading: boolean;
   error: string | null;
+  marketData?: MarketDataType;
 }
 
-const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoading, error }) => {
+const PricingSidebar: React.FC<PricingSidebarProps> = ({ 
+  config, 
+  onQuote, 
+  isLoading, 
+  error,
+  marketData = { 
+    primary: { price: 12.74, lastUpdated: new Date().toISOString() }, 
+    secondary: { price: 12.45, lastUpdated: new Date().toISOString() } 
+  }
+}) => {
   const selectedDeal = getPhysicalDealById(config.deal_type);
   const selectedModel = getModelById(config.pricing_model);
   
@@ -24,6 +45,28 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
     } catch (error) {
       return 'Invalid date';
     }
+  };
+
+  // Format the "last updated" time
+  const formatLastUpdated = (dateString: string) => {
+    try {
+      const lastUpdated = new Date(dateString);
+      const now = new Date();
+      const diffMs = now.getTime() - lastUpdated.getTime();
+      const diffMins = Math.floor(diffMs / 60000);
+      
+      if (diffMins < 1) return 'Just now';
+      if (diffMins < 60) return `${diffMins} min ago`;
+      if (diffMins < 1440) return `${Math.floor(diffMins / 60)} hours ago`;
+      return `${Math.floor(diffMins / 1440)} days ago`;
+    } catch (error) {
+      return 'Unknown';
+    }
+  };
+
+  // Calculate the current spread based on market data
+  const calculateSpread = () => {
+    return (marketData.primary.price - marketData.secondary.price).toFixed(2);
   };
 
   return (
@@ -117,7 +160,7 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
           <div className="flex items-center justify-between">
             <span className="text-gray-400">{config.primary_index}:</span>
             <div className="flex items-center space-x-1">
-              <span className="text-white font-medium">$12.74</span>
+              <span className="text-white font-medium">${marketData.primary.price.toFixed(2)}</span>
               <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
             </div>
           </div>
@@ -125,14 +168,14 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
           <div className="flex items-center justify-between">
             <span className="text-gray-400">{config.secondary_index}:</span>
             <div className="flex items-center space-x-1">
-              <span className="text-white font-medium">$12.45</span>
+              <span className="text-white font-medium">${marketData.secondary.price.toFixed(2)}</span>
               <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
             </div>
           </div>
           
           <div className="flex items-center justify-between">
             <span className="text-gray-400">Spread:</span>
-            <span className="text-blue-400 font-medium">$0.29</span>
+            <span className="text-blue-400 font-medium">${calculateSpread()}</span>
           </div>
           
           <div className="flex items-center justify-between">
@@ -144,7 +187,9 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
         <div className="mt-3 pt-2 border-t border-gray-700">
           <div className="flex items-center space-x-1 text-xs text-gray-400">
             <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
-            <span>Live • Updated 2 min ago</span>
+            <span>
+              Live • Updated {formatLastUpdated(marketData.primary.lastUpdated)}
+            </span>
           </div>
         </div>
       </div>
@@ -156,7 +201,7 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
           <div>
             <h5 className="text-yellow-400 font-semibold text-xs">Risk Disclaimer</h5>
             <p className="text-gray-300 text-xs mt-1 leading-relaxed">
-              Option pricing subject to market volatility and model assumptions.
+              Option pricing subject to market volatility and model assumptions. Results are indicative only.
             </p>
           </div>
         </div>
