@@ -1,5 +1,6 @@
+# backend/app.py
 """
-Main Flask app using the modular pricing framework.
+Main Flask app - Simple version with hardcoded data path
 """
 
 from flask import Flask
@@ -17,9 +18,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# Set up data directory if it doesn't exist
-data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
-os.makedirs(data_dir, exist_ok=True)
+# HARDCODED DATA PATH - From your original example
+data_dir = r'C:\Users\GIOM\OneDrive - Equinor\Desktop\LNG\Prices'
 
 # Initialize backend components
 from init import initialize_backend

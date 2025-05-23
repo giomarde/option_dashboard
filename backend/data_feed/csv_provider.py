@@ -1,5 +1,6 @@
+# backend/data_feed/csv_provider.py
 """
-CSV Data Feed Provider
+CSV Data Feed Provider - Updated with proper path handling
 
 Implementation of the data feed provider interface using CSV files.
 """
@@ -29,12 +30,27 @@ class CSVDataFeedProvider(DataFeedProvider):
         Args:
             data_folder: Path to the folder containing CSV data files
         """
-        self.data_folder = data_folder
+        # Handle both relative and absolute paths
+        if os.path.isabs(data_folder):
+            self.data_folder = data_folder
+        else:
+            # If relative path, make it relative to the backend directory
+            backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self.data_folder = os.path.join(backend_dir, data_folder)
+        
+        logger.info(f"CSV Data Provider initialized with path: {self.data_folder}")
         
         # Make sure the data folder exists
-        if not os.path.exists(data_folder):
-            logger.warning(f"Data folder '{data_folder}' does not exist. Creating it.")
-            os.makedirs(data_folder)
+        if not os.path.exists(self.data_folder):
+            logger.warning(f"Data folder '{self.data_folder}' does not exist. Creating it.")
+            os.makedirs(self.data_folder, exist_ok=True)
+        
+        # Log the contents of the data folder for debugging
+        if os.path.exists(self.data_folder):
+            files = [f for f in os.listdir(self.data_folder) if f.endswith('.csv')]
+            logger.info(f"Found {len(files)} CSV files in data folder: {files}")
+        else:
+            logger.warning(f"Data folder does not exist: {self.data_folder}")
     
     def _get_base_ticker(self, ticker):
         """
@@ -88,10 +104,10 @@ class CSVDataFeedProvider(DataFeedProvider):
             return cleaned_ticker
         
         # Handle special cases for THE and DES
-        if cleaned_ticker.startswith('THE') and cleaned_ticker[3:].isdigit():
+        if cleaned_ticker.startswith('THE') and len(cleaned_ticker) > 3 and cleaned_ticker[3:].isdigit():
             month_num = int(cleaned_ticker[3:])
             return f"THE_M{month_num:02d}"
-        elif cleaned_ticker.startswith('DES') and cleaned_ticker[3:].isdigit():
+        elif cleaned_ticker.startswith('DES') and len(cleaned_ticker) > 3 and cleaned_ticker[3:].isdigit():
             month_num = int(cleaned_ticker[3:])
             return f"DES_M{month_num:02d}"
         else:
@@ -135,6 +151,10 @@ class CSVDataFeedProvider(DataFeedProvider):
         base_ticker = self._get_base_ticker(ticker)
         csv_path = os.path.join(self.data_folder, f"{base_ticker}.csv")
         
+        if verbose:
+            logger.info(f"Looking for CSV file: {csv_path}")
+            logger.info(f"File exists: {os.path.exists(csv_path)}")
+        
         # Try CSV lookup
         if os.path.exists(csv_path):
             if verbose:
@@ -146,6 +166,9 @@ class CSVDataFeedProvider(DataFeedProvider):
                 if verbose:
                     logger.info(f"Raw data shape: {df.shape}")
                     logger.info(f"Columns: {df.columns.tolist()}")
+                    if len(df) > 0:
+                        logger.info(f"Sample of first few rows:")
+                        logger.info(df.head())
                 
                 # Convert DATE column
                 df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
@@ -156,12 +179,20 @@ class CSVDataFeedProvider(DataFeedProvider):
                 df = df[(df['DATE'] >= start_dt) & (df['DATE'] <= end_dt)]
                 
                 if verbose:
-                    logger.info(f"After date filter: {len(df)} rows")
+                    logger.info(f"After date filter ({start_dt} to {end_dt}): {len(df)} rows")
                 
                 # Convert ticker to the new ID format for filtering
                 expected_id = self._convert_to_new_id_format(ticker)
                 
+                if verbose:
+                    logger.info(f"Expected ID format: {expected_id}")
+                
                 if 'ID' in df.columns:
+                    # Show unique IDs for debugging
+                    if verbose and len(df) > 0:
+                        unique_ids = df['ID'].unique()
+                        logger.info(f"Available IDs in CSV: {unique_ids}")
+                    
                     df = df[df['ID'] == expected_id]
                     
                     if verbose:
@@ -174,19 +205,27 @@ class CSVDataFeedProvider(DataFeedProvider):
                     df = df.set_index('DATE')
                     if verbose:
                         logger.info(f"Returning {len(df)} price points")
+                        logger.info(f"Price range: {df['PRICE'].min():.4f} to {df['PRICE'].max():.4f}")
                     return df['PRICE']
                 else:
                     if verbose:
-                        logger.info(f"No data after filtering")
+                        logger.info(f"No data after filtering. Available columns: {df.columns.tolist()}")
                         
             except Exception as e:
                 logger.error(f"CSV read failed: {e}")
+                if verbose:
+                    import traceback
+                    traceback.print_exc()
         else:
             if verbose:
                 logger.info(f"File not found: {csv_path}")
+                # List available files for debugging
+                if os.path.exists(self.data_folder):
+                    available_files = [f for f in os.listdir(self.data_folder) if f.endswith('.csv')]
+                    logger.info(f"Available CSV files: {available_files}")
         
         # Nothing found
-        raise ValueError(f"No data found for {ticker}")
+        raise ValueError(f"No data found for {ticker} in {csv_path}")
     
     def fetch_forward_curve(self, base_ticker: str, num_months: int = 12,
                            curve_date: Optional[Union[str, date, datetime]] = None) -> pd.DataFrame:
@@ -204,12 +243,15 @@ class CSVDataFeedProvider(DataFeedProvider):
         if curve_date is None:
             curve_date = datetime.now().strftime('%Y-%m-%d')
         
+        logger.info(f"Fetching forward curve for {base_ticker} on {curve_date}")
+        
         fwd_data = {}
         
         # First try forward curve CSV
         fc_path = os.path.join(self.data_folder, f"{base_ticker}_forward_curve.csv")
         if os.path.exists(fc_path):
             try:
+                logger.info(f"Found forward curve file: {fc_path}")
                 fc_df = pd.read_csv(fc_path)
                 if 'DATE' in fc_df.columns:
                     fc_df['DATE'] = pd.to_datetime(fc_df['DATE'])
@@ -223,11 +265,13 @@ class CSVDataFeedProvider(DataFeedProvider):
                             fwd_data[month_code] = row[month_code]
                             
                     if fwd_data:
+                        logger.info(f"Successfully loaded forward curve data: {len(fwd_data)} months")
                         return pd.DataFrame([fwd_data], index=[curve_date])
             except Exception as e:
                 logger.error(f"Forward curve CSV failed: {e}")
         
         # Fetch individual months
+        logger.info(f"Fetching individual month contracts for {base_ticker}")
         for i in range(1, num_months + 1):
             month_code = f"M{i:02d}"
             
@@ -238,6 +282,7 @@ class CSVDataFeedProvider(DataFeedProvider):
                 price = self.fetch_data(ticker, curve_date, curve_date, verbose=False)
                 if isinstance(price, pd.Series) and len(price) > 0:
                     fwd_data[month_code] = price.iloc[0]
+                    logger.info(f"Found price for {ticker}: {price.iloc[0]:.4f}")
                 else:
                     logger.warning(f"No data for {ticker} on {curve_date}")
                     fwd_data[month_code] = None
@@ -245,6 +290,7 @@ class CSVDataFeedProvider(DataFeedProvider):
                 logger.warning(f"Error fetching {ticker}: {str(e)}")
                 fwd_data[month_code] = None
         
+        logger.info(f"Forward curve constructed with {len([v for v in fwd_data.values() if v is not None])} valid prices")
         return pd.DataFrame([fwd_data], index=[curve_date])
     
     def fetch_market_data(self, ticker: str, date: Optional[Union[str, date, datetime]] = None) -> Dict:

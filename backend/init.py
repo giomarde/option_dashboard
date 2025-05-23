@@ -1,5 +1,6 @@
+# backend/init.py
 """
-Integration initialization module.
+Integration initialization module - Updated with proper path handling.
 
 This module sets up the connections between different components of the pricing system.
 """
@@ -12,21 +13,32 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def initialize_backend(app_instance=None, data_folder='data'):
+def initialize_backend(app_instance=None, data_folder=None):
     """
     Initialize the backend components.
     
     Args:
         app_instance: Optional Flask app instance
-        data_folder: Path to the data folder
+        data_folder: Path to the data folder (can be absolute or relative)
         
     Returns:
         Dictionary with initialized components
     """
     logger.info("Initializing backend components")
     
+    # Determine data folder path
+    if data_folder is None:
+        # Default to 'data' folder in backend directory
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        data_folder = os.path.join(backend_dir, 'data')
+    elif not os.path.isabs(data_folder):
+        # If relative path provided, make it relative to backend directory
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        data_folder = os.path.join(backend_dir, data_folder)
+    
     # Make sure the data folder exists
     os.makedirs(data_folder, exist_ok=True)
+    logger.info(f"Using data folder: {data_folder}")
     
     # Initialize data provider
     from data_feed import get_data_provider
@@ -155,3 +167,31 @@ def register_api_routes(app, option_processor, data_provider):
         except Exception as e:
             logger.error(f"Error getting volatility surface: {str(e)}", exc_info=True)
             return jsonify({"error": True, "message": f"Failed to get volatility surface: {str(e)}"}), 500
+    
+    @app.route('/api/test/data-folder', methods=['GET'])
+    def test_data_folder():
+        """
+        Test endpoint to check data folder configuration and contents
+        """
+        try:
+            # Get data folder path from data provider
+            data_folder_path = data_provider.data_folder
+            
+            # Check if folder exists
+            folder_exists = os.path.exists(data_folder_path)
+            
+            # List CSV files if folder exists
+            csv_files = []
+            if folder_exists:
+                csv_files = [f for f in os.listdir(data_folder_path) if f.endswith('.csv')]
+            
+            return jsonify({
+                "data_folder": data_folder_path,
+                "exists": folder_exists,
+                "csv_files": csv_files,
+                "file_count": len(csv_files)
+            })
+            
+        except Exception as e:
+            logger.error(f"Error testing data folder: {str(e)}", exc_info=True)
+            return jsonify({"error": True, "message": f"Failed to test data folder: {str(e)}"}), 500
