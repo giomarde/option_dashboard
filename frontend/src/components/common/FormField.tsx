@@ -19,6 +19,7 @@ interface FormFieldProps {
   required?: boolean;
   disabled?: boolean;
   helperText?: string;
+  size?: 'sm' | 'md' | 'lg';
 }
 
 const FormField: React.FC<FormFieldProps> = ({
@@ -33,11 +34,18 @@ const FormField: React.FC<FormFieldProps> = ({
   placeholder,
   required = false,
   disabled = false,
-  helperText
+  helperText,
+  size = 'md'
 }) => {
+  const sizeClasses = {
+    sm: 'px-2 py-1 text-xs',
+    md: 'px-3 py-2 text-sm',
+    lg: 'px-4 py-3 text-base'
+  };
+
   const baseClasses = `
-    w-full px-4 py-3 bg-gray-700 border-2 border-gray-600 text-white text-sm
-    focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+    w-full ${sizeClasses[size]} bg-gray-700 border border-gray-600 text-white
+    rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500
     transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed
   `;
 
@@ -104,8 +112,8 @@ const FormField: React.FC<FormFieldProps> = ({
   };
 
   return (
-    <div className="space-y-2">
-      <label className="block text-sm font-semibold text-gray-300">
+    <div className="space-y-1">
+      <label className={`block ${size === 'sm' ? 'text-xs' : 'text-sm'} font-medium text-gray-300`}>
         {label}
         {required && <span className="text-red-400 ml-1">*</span>}
       </label>
@@ -113,7 +121,7 @@ const FormField: React.FC<FormFieldProps> = ({
       {renderInput()}
       
       {helperText && (
-        <p className="text-xs text-gray-400">{helperText}</p>
+        <p className="text-xs text-gray-400 mt-1">{helperText}</p>
       )}
     </div>
   );

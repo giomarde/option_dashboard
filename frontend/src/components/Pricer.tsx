@@ -1,15 +1,22 @@
 // src/components/Pricer.tsx
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import PricingForm from './pricing/PricingForm';
 import PricingResults from './pricing/PricingResults';
 import PricingSidebar from './pricing/PricingSidebar';
+import { getPhysicalDealById, getCompatibleModels } from './config/pricingConfig';
 
 export interface PricingConfig {
+  // Deal Type
+  deal_type: string;
   option_type: string;
   option_style: string;
+  
+  // Indices
   primary_index: string;
   secondary_index: string;
   output_unit: string;
+  
+  // Contract Details
   cargo_volume: number;
   evaluation_date: string;
   num_options: number;
@@ -17,14 +24,22 @@ export interface PricingConfig {
   first_delivery_year: number;
   delivery_day: number;
   decision_days_prior: number;
+  
+  // Pricing
+  pricing_model: string;
   pricing_method: string;
   total_cost_per_option: number;
   primary_differential: number;
   secondary_differential: number;
   locked_diff: string;
+  
+  // Monte Carlo
   run_monte_carlo: boolean;
   mc_paths: number;
   mc_seed: number;
+  
+  // Model specific parameters
+  model_params: Record<string, any>;
 }
 
 export interface PricingResults {
@@ -43,7 +58,8 @@ export interface PricingResults {
 
 const Pricer: React.FC = () => {
   const [config, setConfig] = useState<PricingConfig>({
-    option_type: 'call',
+    deal_type: 'regasification',
+    option_type: 'vanilla_spread',
     option_style: 'european',
     primary_index: 'THE',
     secondary_index: 'TFU',
@@ -55,6 +71,7 @@ const Pricer: React.FC = () => {
     first_delivery_year: 2025,
     delivery_day: 7,
     decision_days_prior: 21,
+    pricing_model: 'bachelier',
     pricing_method: 'fixed_differential',
     total_cost_per_option: 0.70,
     primary_differential: 0.0,
@@ -63,11 +80,31 @@ const Pricer: React.FC = () => {
     run_monte_carlo: true,
     mc_paths: 10000,
     mc_seed: 42,
+    model_params: {}
   });
 
   const [results, setResults] = useState<PricingResults | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Update option type when deal type changes
+  useEffect(() => {
+    const deal = getPhysicalDealById(config.deal_type);
+    if (deal && deal.underlyingOptionType !== config.option_type) {
+      const newConfig = {
+        ...config,
+        option_type: deal.underlyingOptionType
+      };
+      
+      // Update pricing model if current one is not compatible
+      const compatibleModels = getCompatibleModels(deal.underlyingOptionType);
+      if (!compatibleModels.find(m => m.id === config.pricing_model)) {
+        newConfig.pricing_model = compatibleModels[0]?.id || 'bachelier';
+      }
+      
+      setConfig(newConfig);
+    }
+  }, [config.deal_type]);
 
   const handleConfigChange = (field: string, value: any) => {
     setConfig(prev => ({
@@ -81,18 +118,9 @@ const Pricer: React.FC = () => {
     setError(null);
     
     try {
-      // TODO: Replace with actual API call to your Python backend
-      // const response = await fetch('/api/price-option', {
-      //   method: 'POST',
-      //   headers: { 'Content-Type': 'application/json' },
-      //   body: JSON.stringify(config)
-      // });
-      // const data = await response.json();
-      
-      // Simulate API call delay
+      // Simulate API call
       await new Promise(resolve => setTimeout(resolve, 2000));
       
-      // Mock results based on your backend output
       const mockResults: PricingResults = {
         total_value: 0.1957,
         option_values: {
@@ -136,28 +164,30 @@ const Pricer: React.FC = () => {
   };
 
   return (
-    <div className="w-full">
-      <div className="px-8 py-6">
-        <div className="mb-8">
-          <h2 className="text-2xl font-bold text-white mb-2">Option Pricing Engine</h2>
-          <p className="text-gray-400">Configure and price sophisticated option structures</p>
+    <div className="w-full bg-gray-900 min-h-screen">
+      <div className="px-6 py-4">
+        <div className="mb-4">
+          <h2 className="text-xl font-bold text-white">Option Pricing Engine</h2>
+          <p className="text-gray-400 text-sm">Configure and price sophisticated option structures</p>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
+        <div className="grid grid-cols-12 gap-4">
           {/* Main Form Area */}
-          <div className="xl:col-span-3 space-y-6">
+          <div className="col-span-9">
             <PricingForm 
               config={config} 
               onConfigChange={handleConfigChange}
             />
             
             {results && (
-              <PricingResults results={results} config={config} />
+              <div className="mt-4">
+                <PricingResults results={results} config={config} />
+              </div>
             )}
           </div>
 
           {/* Sidebar */}
-          <div className="xl:col-span-1">
+          <div className="col-span-3">
             <PricingSidebar 
               config={config}
               onQuote={handleQuote}

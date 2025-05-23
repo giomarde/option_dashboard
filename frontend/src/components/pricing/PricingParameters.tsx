@@ -2,6 +2,7 @@
 import React from 'react';
 import { PricingConfig } from '../Pricer';
 import FormField from '../common/FormField';
+import { PRICING_MODELS, getCompatibleModels } from '../../config/pricingConfig';
 
 interface PricingParametersProps {
   config: PricingConfig;
@@ -9,36 +10,50 @@ interface PricingParametersProps {
 }
 
 const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigChange }) => {
+  const compatibleModels = getCompatibleModels(config.option_type);
+
   return (
-    <div className="bg-gray-800 border-2 border-gray-700 p-6">
-      <h3 className="text-lg font-semibold text-white mb-6 pb-3 border-b-2 border-gray-700">
-        Pricing Parameters
-      </h3>
+    <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+      <h3 className="text-base font-semibold text-white mb-3">Pricing Parameters</h3>
       
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-6 gap-3">
         <FormField
-          label="Pricing Method"
+          label="Pricing Model"
+          type="select"
+          value={config.pricing_model}
+          onChange={(value) => onConfigChange('pricing_model', value)}
+          options={compatibleModels.map(m => ({ 
+            value: m.id, 
+            label: m.name 
+          }))}
+          size="sm"
+          helperText={compatibleModels.find(m => m.id === config.pricing_model)?.description}
+        />
+
+        <FormField
+          label="Method"
           type="select"
           value={config.pricing_method}
           onChange={(value) => onConfigChange('pricing_method', value)}
           options={[
-            { value: 'fixed_differential', label: 'Fixed Differential' },
+            { value: 'fixed_differential', label: 'Fixed Diff' },
             { value: 'fair_value', label: 'Fair Value' }
           ]}
+          size="sm"
         />
 
         <FormField
-          label="Regas Cost (USD/MMBtu)"
+          label="Regas Cost"
           type="number"
           value={config.total_cost_per_option}
           onChange={(value) => onConfigChange('total_cost_per_option', Number(value))}
           step={0.01}
           min={0}
-          helperText="Total regasification cost per MMBtu"
+          size="sm"
         />
 
         <FormField
-          label="Lock Differential"
+          label="Lock Diff"
           type="select"
           value={config.locked_diff}
           onChange={(value) => onConfigChange('locked_diff', value)}
@@ -46,59 +61,43 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
             { value: 'no', label: 'No' },
             { value: 'yes', label: 'Yes' }
           ]}
-          helperText="Whether differential is locked"
+          size="sm"
         />
 
         <FormField
-          label="Primary Differential"
+          label="Primary Diff"
           type="number"
           value={config.primary_differential}
           onChange={(value) => onConfigChange('primary_differential', Number(value))}
           step={0.01}
           disabled={config.pricing_method === 'fair_value'}
-          helperText={`${config.primary_index} differential`}
+          size="sm"
         />
 
         <FormField
-          label="Secondary Differential"
+          label="Secondary Diff"
           type="number"
           value={config.secondary_differential}
           onChange={(value) => onConfigChange('secondary_differential', Number(value))}
           step={0.01}
           disabled={config.pricing_method === 'fair_value'}
-          helperText={`${config.secondary_index} differential`}
+          size="sm"
         />
       </div>
 
       {/* Strike Price Calculation */}
-      <div className="mt-6 p-4 bg-gray-750 border-2 border-gray-600">
-        <h4 className="text-sm font-semibold text-white mb-3">Strike Price Calculation</h4>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-          <div className="space-y-2">
-            <div className="flex justify-between">
-              <span className="text-gray-400">Secondary Differential:</span>
-              <span className="text-white">{config.secondary_differential.toFixed(4)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-400">Primary Differential:</span>
-              <span className="text-white">{config.primary_differential.toFixed(4)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-400">Regas Cost:</span>
-              <span className="text-white">{config.total_cost_per_option.toFixed(4)}</span>
-            </div>
-            <div className="flex justify-between border-t-2 border-gray-600 pt-2">
-              <span className="text-gray-300 font-medium">Strike Price (K):</span>
-              <span className="text-blue-400 font-semibold">
-                {(config.secondary_differential - config.primary_differential + config.total_cost_per_option).toFixed(4)}
-              </span>
-            </div>
+      <div className="mt-3 p-2 bg-gray-750 rounded-md">
+        <div className="flex items-center justify-between text-xs">
+          <div className="flex items-center space-x-4">
+            <span className="text-gray-400">Strike = {config.secondary_differential.toFixed(2)} - {config.primary_differential.toFixed(2)} + {config.total_cost_per_option.toFixed(2)}</span>
+            <span className="text-gray-300">=</span>
+            <span className="text-blue-400 font-semibold">
+              {(config.secondary_differential - config.primary_differential + config.total_cost_per_option).toFixed(4)}
+            </span>
           </div>
-          <div className="text-xs text-gray-400 space-y-1">
-            <p>• Strike = Secondary Diff - Primary Diff + Regas Cost</p>
-            <p>• For call options: exercise when spread > strike</p>
-            <p>• For put options: exercise when spread &lt; strike</p>
-          </div>
+          <span className="text-gray-400">
+            Exercise when spread {config.option_type === 'call' ? '>' : '<'} strike
+          </span>
         </div>
       </div>
     </div>
