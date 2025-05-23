@@ -1,8 +1,8 @@
 // src/components/pricing/ContractSpecifications.tsx
-import React, { useState } from 'react';
+import React from 'react';
 import { PricingConfig } from '../Pricer';
 import FormField from '../common/FormField';
-import { PHYSICAL_DEALS, OPTION_TYPES, getPhysicalDealById } from '../../config/pricingConfig';
+import { PHYSICAL_DEALS, getPhysicalDealById } from '../../config/pricingConfig';
 
 interface ContractSpecificationsProps {
   config: PricingConfig;
@@ -10,61 +10,40 @@ interface ContractSpecificationsProps {
 }
 
 const ContractSpecifications: React.FC<ContractSpecificationsProps> = ({ config, onConfigChange }) => {
-  const [showAdvancedMode, setShowAdvancedMode] = useState(false);
-  
   const selectedDeal = getPhysicalDealById(config.deal_type);
+  
+  const handleDealTypeChange = (value: string | number) => {
+    // Convert to string if needed
+    const dealType = value.toString();
+    
+    // If geographical arbitrage is selected, we may need to set up additional indices
+    onConfigChange('deal_type', dealType);
+    
+    // Add functionality for geographical arbitrage to add more indices
+    if (dealType === 'geographical_arbitrage') {
+      // Initialize with 3 indices (could be expanded based on user interaction)
+      onConfigChange('basket_indices', ['THE', 'JKM', 'DES']);
+    }
+  };
   
   return (
     <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
-      <div className="flex items-center justify-between mb-3">
+      <div className="mb-3">
         <h3 className="text-base font-semibold text-white">Contract Specifications</h3>
-        <label className="flex items-center space-x-2 text-xs">
-          <input
-            type="checkbox"
-            checked={showAdvancedMode}
-            onChange={(e) => setShowAdvancedMode(e.target.checked)}
-            className="rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-800"
-          />
-          <span className="text-gray-400">Advanced Mode</span>
-        </label>
       </div>
       
       <div className="grid grid-cols-6 gap-3">
-        {/* Deal Type / Option Type Selection */}
-        {!showAdvancedMode ? (
-          <div className="col-span-2">
-            <FormField
-              label="Deal Type"
-              type="select"
-              value={config.deal_type}
-              onChange={(value) => onConfigChange('deal_type', value)}
-              options={PHYSICAL_DEALS.map(d => ({ value: d.id, label: d.name }))}
-              size="sm"
-            />
-          </div>
-        ) : (
-          <>
-            <FormField
-              label="Option Type"
-              type="select"
-              value={config.option_type}
-              onChange={(value) => onConfigChange('option_type', value)}
-              options={OPTION_TYPES.map(t => ({ value: t.id, label: t.name }))}
-              size="sm"
-            />
-            <FormField
-              label="Option Style"
-              type="select"
-              value={config.option_style}
-              onChange={(value) => onConfigChange('option_style', value)}
-              options={[
-                { value: 'european', label: 'European' },
-                { value: 'american', label: 'American' }
-              ]}
-              size="sm"
-            />
-          </>
-        )}
+        {/* Deal Type Selection */}
+        <div className="col-span-2">
+          <FormField
+            label="Deal Type"
+            type="select"
+            value={config.deal_type}
+            onChange={handleDealTypeChange}
+            options={PHYSICAL_DEALS.map(d => ({ value: d.id, label: d.name }))}
+            size="sm"
+          />
+        </div>
 
         <FormField
           label="Primary Index"
@@ -79,18 +58,47 @@ const ContractSpecifications: React.FC<ContractSpecificationsProps> = ({ config,
           size="sm"
         />
 
-        <FormField
-          label="Secondary Index"
-          type="select"
-          value={config.secondary_index}
-          onChange={(value) => onConfigChange('secondary_index', value)}
-          options={[
-            { value: 'TFU', label: 'TFU (LNG)' },
-            { value: 'THE', label: 'THE (TTF)' },
-            { value: 'DES', label: 'DES (LNG)' }
-          ]}
-          size="sm"
-        />
+        {config.deal_type !== 'geographical_arbitrage' ? (
+          <FormField
+            label="Secondary Index"
+            type="select"
+            value={config.secondary_index}
+            onChange={(value) => onConfigChange('secondary_index', value)}
+            options={[
+              { value: 'TFU', label: 'TFU (LNG)' },
+              { value: 'THE', label: 'THE (TTF)' },
+              { value: 'DES', label: 'DES (LNG)' }
+            ]}
+            size="sm"
+          />
+        ) : (
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-gray-300 mb-1">Basket Indices</label>
+            <div className="flex gap-1">
+              {config.basket_indices.map((index, i) => (
+                <span key={i} className="px-2 py-1 bg-gray-700 text-white text-xs rounded-md">
+                  {index}
+                </span>
+              ))}
+              <button 
+                className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white text-xs rounded-md"
+                onClick={() => {
+                  const availableIndices = ['THE', 'JKM', 'DES', 'TFU', 'NBP', 'HH'];
+                  const currentIndices = config.basket_indices || [];
+                  
+                  // Find an index that's not already in the basket
+                  const newIndex = availableIndices.find(idx => !currentIndices.includes(idx));
+                  
+                  if (newIndex) {
+                    onConfigChange('basket_indices', [...currentIndices, newIndex]);
+                  }
+                }}
+              >
+                + Add
+              </button>
+            </div>
+          </div>
+        )}
 
         <FormField
           label="Output Unit"
@@ -124,11 +132,6 @@ const ContractSpecifications: React.FC<ContractSpecificationsProps> = ({ config,
             : `Option on ${config.primary_index}`
           }
           {' '}for {config.cargo_volume.toLocaleString()} MMBtu.
-          {showAdvancedMode && (
-            <span className="text-gray-400 ml-2">
-              (Mathematical: {config.option_type.replace('_', ' ')})
-            </span>
-          )}
         </p>
       </div>
     </div>

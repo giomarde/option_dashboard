@@ -13,6 +13,18 @@ interface PricingSidebarProps {
 const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoading, error }) => {
   const selectedDeal = getPhysicalDealById(config.deal_type);
   const selectedModel = getModelById(config.pricing_model);
+  
+  // Calculate option expiry date (delivery date - decision days prior)
+  const calculateOptionExpiry = () => {
+    try {
+      const deliveryDate = new Date(config.evaluation_date);
+      const expiryDate = new Date(deliveryDate);
+      expiryDate.setDate(deliveryDate.getDate() - config.decision_days_prior);
+      return expiryDate.toLocaleDateString();
+    } catch (error) {
+      return 'Invalid date';
+    }
+  };
 
   return (
     <div className="space-y-3 sticky top-4">
@@ -62,6 +74,18 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
           <div className="flex justify-between">
             <span className="text-gray-400">Volume:</span>
             <span className="text-white font-medium">{(config.cargo_volume * config.num_options).toLocaleString()} MMBtu</span>
+          </div>
+          
+          <div className="flex justify-between">
+            <span className="text-gray-400">Delivery Date:</span>
+            <span className="text-white font-medium">
+              {new Date(config.evaluation_date).toLocaleDateString()}
+            </span>
+          </div>
+          
+          <div className="flex justify-between">
+            <span className="text-gray-400">Option Expiry:</span>
+            <span className="text-white font-medium">{calculateOptionExpiry()}</span>
           </div>
           
           <div className="flex justify-between">

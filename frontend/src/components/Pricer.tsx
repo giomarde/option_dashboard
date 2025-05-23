@@ -1,4 +1,4 @@
-// src/components/Pricer.tsx
+// src/components/Pricer.tsx (with updated PricingConfig interface)
 import React, { useState, useEffect } from 'react';
 import PricingForm from './pricing/PricingForm';
 import PricingResults from './pricing/PricingResults';
@@ -15,6 +15,7 @@ export interface PricingConfig {
   primary_index: string;
   secondary_index: string;
   output_unit: string;
+  basket_indices: string[]; // For basket options (geographical arbitrage)
   
   // Contract Details
   cargo_volume: number;
@@ -24,6 +25,8 @@ export interface PricingConfig {
   first_delivery_year: number;
   delivery_day: number;
   decision_days_prior: number;
+  contract_type: string; // 'single' or 'term'
+  frequency: string; // 'weekly', 'biweekly', 'monthly', etc.
   
   // Pricing
   pricing_model: string;
@@ -80,6 +83,9 @@ const Pricer: React.FC = () => {
     run_monte_carlo: true,
     mc_paths: 10000,
     mc_seed: 42,
+    contract_type: 'single',
+    frequency: 'monthly',
+    basket_indices: [],
     model_params: {}
   });
 

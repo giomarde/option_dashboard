@@ -24,17 +24,51 @@ const DeliverySchedule: React.FC<DeliveryScheduleProps> = ({ config, onConfigCha
     { value: 'Dec', label: 'Dec' },
   ];
 
+  const frequencyOptions = [
+    { value: 'single', label: 'Single' },
+    { value: 'weekly', label: 'Weekly' },
+    { value: 'biweekly', label: 'Bi-Weekly' },
+    { value: 'monthly', label: 'Monthly' },
+    { value: 'quarterly', label: 'Quarterly' },
+    { value: 'semiannual', label: 'Semi-Annual' },
+    { value: 'annual', label: 'Annual' },
+  ];
+
+  const contractTypeOptions = [
+    { value: 'single', label: 'Single' },
+    { value: 'term', label: 'Term' },
+  ];
+
   return (
     <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
       <h3 className="text-base font-semibold text-white mb-3">Delivery Schedule</h3>
       
       <div className="grid grid-cols-6 gap-3">
         <FormField
-          label="Evaluation Date"
+          label="Delivery Date"
           type="date"
           value={config.evaluation_date}
           onChange={(value) => onConfigChange('evaluation_date', value)}
           required
+          size="sm"
+        />
+
+        <FormField
+          label="Contract Type"
+          type="select"
+          value={config.contract_type || 'single'}
+          onChange={(value) => onConfigChange('contract_type', value)}
+          options={contractTypeOptions}
+          size="sm"
+        />
+
+        <FormField
+          label="Frequency"
+          type="select"
+          value={config.frequency || 'monthly'}
+          onChange={(value) => onConfigChange('frequency', value)}
+          options={frequencyOptions}
+          disabled={config.contract_type !== 'term'}
           size="sm"
         />
 
@@ -91,18 +125,22 @@ const DeliverySchedule: React.FC<DeliveryScheduleProps> = ({ config, onConfigCha
       </div>
 
       {/* Compact Summary */}
-      <div className="mt-3 flex items-center justify-between text-xs text-gray-400 bg-gray-750 rounded-md p-2">
-        <span>
-          First: {config.first_delivery_month} {config.delivery_day}, {config.first_delivery_year}
-        </span>
-        <span className="text-gray-300">•</span>
-        <span>
-          Total: {config.num_options} options
-        </span>
-        <span className="text-gray-300">•</span>
-        <span>
-          Volume: {(config.cargo_volume * config.num_options).toLocaleString()} MMBtu
-        </span>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-400 bg-gray-750 rounded-md p-2">
+        <div>
+          <span>First: {config.first_delivery_month} {config.delivery_day}, {config.first_delivery_year}</span>
+        </div>
+        <div>
+          <span>Total: {config.num_options} options</span>
+        </div>
+        <div>
+          <span>Contract: {config.contract_type || 'Single'}</span>
+          {config.contract_type === 'term' && (
+            <span className="ml-1">({config.frequency || 'Monthly'})</span>
+          )}
+        </div>
+        <div>
+          <span>Volume: {(config.cargo_volume * config.num_options).toLocaleString()} MMBtu</span>
+        </div>
       </div>
     </div>
   );

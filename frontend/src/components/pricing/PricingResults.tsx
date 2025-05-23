@@ -36,7 +36,6 @@ export interface PricingResults extends BasePricingResults {
 }
 // --- End Helper Type Definitions ---
 
-
 interface PricingResultsProps {
   results: PricingResults;
   config: PricingConfig;
@@ -118,7 +117,6 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
   const secondarySmileData = results.volatility_smiles?.secondary && results.volatility_smiles.secondary.length > 0 ? results.volatility_smiles.secondary : mockSecondarySmile;
   const spreadSmileData = results.volatility_smiles?.spread && results.volatility_smiles.spread.length > 0 ? results.volatility_smiles.spread : mockSpreadSmile;
 
-
   const allStrikes = [
     ...primarySmileData.map((p: VolatilityPoint) => p.strike),
     ...secondarySmileData.map((p: VolatilityPoint) => p.strike),
@@ -138,7 +136,7 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
     : ['auto', 'auto'];
 
   return (
-    <div className="space-y-6 p-2 md:p-4 bg-gray-900 text-white">
+    <div className="space-y-6 bg-gray-900 text-white">
       
       <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
         <div className="flex flex-col sm:flex-row justify-between sm:items-center mb-3">
@@ -234,9 +232,9 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
               Spread Vol
             </button>
           </div>
-          <div className="h-64 md:h-80">
+          <div className="h-64 md:h-80 flex items-center justify-center">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart margin={{ top: 5, right: 25, left: -10, bottom: 20 }}> {/* Adjusted left margin for Y-axis label */}
+              <LineChart margin={{ top: 15, right: 30, left: 0, bottom: 20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis 
                     dataKey="strike" 
@@ -251,7 +249,7 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
                     tick={{ fontSize: 10 }} 
                     domain={yDomainSmiles}
                     tickFormatter={(tick: number) => `${(tick * 100).toFixed(0)}%`}
-                    label={{ value: "Volatility", angle: -90, position: 'insideLeft', dx:-0, fontSize: 10, fill:"#9CA3AF" }} // Adjusted dx for Y-axis label
+                    label={{ value: "Volatility", angle: -90, position: 'insideLeft', dx:10, fontSize: 10, fill:"#9CA3AF" }}
                 />
                 <Tooltip 
                   contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: '6px', color: '#F9FAFB', fontSize: '12px' }}
@@ -273,9 +271,9 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
 
         <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
           <h3 className="text-base font-semibold text-white mb-3">Option Value Breakdown</h3>
-          <div className="h-64 md:h-80">
+          <div className="h-64 md:h-80 flex items-center justify-center">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={optionValueChartData} margin={{ top: 5, right: 20, left: -20, bottom: 5 }}>
+              <BarChart data={optionValueChartData} margin={{ top: 15, right: 20, left: 0, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis dataKey="date" stroke="#9CA3AF" tick={{ fontSize: 10 }} />
                 <YAxis stroke="#9CA3AF" tick={{ fontSize: 10 }} tickFormatter={(tick: number) => tick.toFixed(3)} />

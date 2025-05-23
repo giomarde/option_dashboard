@@ -2,7 +2,7 @@
 import React from 'react';
 import { PricingConfig } from '../Pricer';
 import FormField from '../common/FormField';
-import { PRICING_MODELS, getCompatibleModels } from '../../config/pricingConfig';
+import { PRICING_MODELS, OPTION_TYPES, getCompatibleModels } from '../../config/pricingConfig';
 
 interface PricingParametersProps {
   config: PricingConfig;
@@ -17,6 +17,28 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
       <h3 className="text-base font-semibold text-white mb-3">Pricing Parameters</h3>
       
       <div className="grid grid-cols-6 gap-3">
+        {/* Option Type/Style Controls - Moved from Contract Specifications */}
+        <FormField
+          label="Option Type"
+          type="select"
+          value={config.option_type}
+          onChange={(value) => onConfigChange('option_type', value)}
+          options={OPTION_TYPES.map(t => ({ value: t.id, label: t.name }))}
+          size="sm"
+        />
+        
+        <FormField
+          label="Option Style"
+          type="select"
+          value={config.option_style}
+          onChange={(value) => onConfigChange('option_style', value)}
+          options={[
+            { value: 'european', label: 'European' },
+            { value: 'american', label: 'American' }
+          ]}
+          size="sm"
+        />
+        
         <FormField
           label="Pricing Model"
           type="select"
@@ -36,14 +58,14 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
           value={config.pricing_method}
           onChange={(value) => onConfigChange('pricing_method', value)}
           options={[
-            { value: 'fixed_differential', label: 'Fixed Diff' },
+            { value: 'fixed_differential', label: 'Fixed Differential' },
             { value: 'fair_value', label: 'Fair Value' }
           ]}
           size="sm"
         />
 
         <FormField
-          label="Regas Cost"
+          label="Exercise Cost"
           type="number"
           value={config.total_cost_per_option}
           onChange={(value) => onConfigChange('total_cost_per_option', Number(value))}
@@ -53,7 +75,7 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
         />
 
         <FormField
-          label="Lock Diff"
+          label="Locked Differential"
           type="select"
           value={config.locked_diff}
           onChange={(value) => onConfigChange('locked_diff', value)}
@@ -65,7 +87,7 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
         />
 
         <FormField
-          label="Primary Diff"
+          label="Primary Differential"
           type="number"
           value={config.primary_differential}
           onChange={(value) => onConfigChange('primary_differential', Number(value))}
@@ -75,7 +97,7 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
         />
 
         <FormField
-          label="Secondary Diff"
+          label="Secondary Differential"
           type="number"
           value={config.secondary_differential}
           onChange={(value) => onConfigChange('secondary_differential', Number(value))}
