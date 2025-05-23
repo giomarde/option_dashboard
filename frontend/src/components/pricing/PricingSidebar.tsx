@@ -47,7 +47,7 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
         <div className="space-y-3 text-sm">
           <div className="flex justify-between">
             <span className="text-gray-400">Option Type:</span>
-            <span className="text-white font-medium capitalize">{config.option_type}</span>
+            <span className="text-white font-medium capitalize">{config.option_type.replace('_', ' ')}</span>
           </div>
           
           <div className="flex justify-between">
