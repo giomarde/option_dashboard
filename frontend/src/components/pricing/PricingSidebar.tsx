@@ -1,6 +1,7 @@
 // src/components/pricing/PricingSidebar.tsx
 import React from 'react';
 import { PricingConfig } from '../Pricer';
+import { getPhysicalDealById, getModelById } from '../../config/pricingConfig';
 
 interface PricingSidebarProps {
   config: PricingConfig;
@@ -10,22 +11,25 @@ interface PricingSidebarProps {
 }
 
 const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoading, error }) => {
+  const selectedDeal = getPhysicalDealById(config.deal_type);
+  const selectedModel = getModelById(config.pricing_model);
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-3 sticky top-4">
       {/* Quote Button */}
-      <div className="bg-gray-800 border-2 border-gray-700 p-6">
+      <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
         <button
           onClick={onQuote}
           disabled={isLoading}
-          className={`w-full py-4 px-6 font-semibold text-lg transition-all duration-200 border-2 ${
+          className={`w-full py-3 px-4 font-semibold text-sm rounded-lg transition-all duration-200 ${
             isLoading
-              ? 'bg-gray-600 text-gray-400 cursor-not-allowed border-gray-600'
-              : 'bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-lg hover:shadow-xl transform hover:-translate-y-1 border-transparent'
+              ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+              : 'bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-lg hover:shadow-xl transform hover:-translate-y-0.5'
           }`}
         >
           {isLoading ? (
             <div className="flex items-center justify-center space-x-2">
-              <div className="animate-spin h-5 w-5 border-2 border-gray-300 border-t-transparent rounded-full"></div>
+              <div className="animate-spin h-4 w-4 border-2 border-gray-300 border-t-transparent rounded-full"></div>
               <span>Pricing...</span>
             </div>
           ) : (
@@ -34,20 +38,20 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
         </button>
 
         {error && (
-          <div className="mt-4 p-3 bg-red-900 bg-opacity-30 border-2 border-red-600 text-red-200 text-sm">
+          <div className="mt-3 p-2 bg-red-900 bg-opacity-30 border border-red-600 rounded-md text-red-200 text-xs">
             {error}
           </div>
         )}
       </div>
 
-      {/* Parameter Summary */}
-      <div className="bg-gray-800 border-2 border-gray-700 p-6">
-        <h4 className="text-lg font-semibold text-white mb-4">Configuration Summary</h4>
+      {/* Configuration Summary */}
+      <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+        <h4 className="text-sm font-semibold text-white mb-3">Configuration Summary</h4>
         
-        <div className="space-y-3 text-sm">
+        <div className="space-y-2 text-xs">
           <div className="flex justify-between">
-            <span className="text-gray-400">Option Type:</span>
-            <span className="text-white font-medium capitalize">{config.option_type.replace('_', ' ')}</span>
+            <span className="text-gray-400">Deal Type:</span>
+            <span className="text-white font-medium">{selectedDeal?.name || 'Custom'}</span>
           </div>
           
           <div className="flex justify-between">
@@ -68,10 +72,8 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
           </div>
           
           <div className="flex justify-between">
-            <span className="text-gray-400">Method:</span>
-            <span className="text-white font-medium">
-              {config.pricing_method === 'fixed_differential' ? 'Fixed Diff.' : 'Fair Value'}
-            </span>
+            <span className="text-gray-400">Model:</span>
+            <span className="text-white font-medium">{selectedModel?.name || 'Unknown'}</span>
           </div>
           
           {config.run_monte_carlo && (
@@ -84,55 +86,53 @@ const PricingSidebar: React.FC<PricingSidebarProps> = ({ config, onQuote, isLoad
       </div>
 
       {/* Market Data Status */}
-      <div className="bg-gray-800 border-2 border-gray-700 p-6">
-        <h4 className="text-lg font-semibold text-white mb-4">Market Data</h4>
+      <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+        <h4 className="text-sm font-semibold text-white mb-3">Market Data</h4>
         
-        <div className="space-y-3">
+        <div className="space-y-2 text-xs">
           <div className="flex items-center justify-between">
-            <span className="text-gray-400 text-sm">{config.primary_index} Price:</span>
-            <div className="flex items-center space-x-2">
+            <span className="text-gray-400">{config.primary_index}:</span>
+            <div className="flex items-center space-x-1">
               <span className="text-white font-medium">$12.74</span>
-              <span className="w-2 h-2 bg-green-400 rounded-full"></span>
+              <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
             </div>
           </div>
           
           <div className="flex items-center justify-between">
-            <span className="text-gray-400 text-sm">{config.secondary_index} Price:</span>
-            <div className="flex items-center space-x-2">
+            <span className="text-gray-400">{config.secondary_index}:</span>
+            <div className="flex items-center space-x-1">
               <span className="text-white font-medium">$12.45</span>
-              <span className="w-2 h-2 bg-green-400 rounded-full"></span>
+              <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
             </div>
           </div>
           
           <div className="flex items-center justify-between">
-            <span className="text-gray-400 text-sm">Current Spread:</span>
+            <span className="text-gray-400">Spread:</span>
             <span className="text-blue-400 font-medium">$0.29</span>
           </div>
           
           <div className="flex items-center justify-between">
-            <span className="text-gray-400 text-sm">Implied Vol:</span>
+            <span className="text-gray-400">Vol:</span>
             <span className="text-white font-medium">37.06%</span>
           </div>
         </div>
         
-        <div className="mt-4 pt-3 border-t-2 border-gray-700">
-          <div className="flex items-center space-x-2 text-xs text-gray-400">
-            <span className="w-2 h-2 bg-green-400 rounded-full"></span>
-            <span>Live data • Updated 2 min ago</span>
+        <div className="mt-3 pt-2 border-t border-gray-700">
+          <div className="flex items-center space-x-1 text-xs text-gray-400">
+            <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
+            <span>Live • Updated 2 min ago</span>
           </div>
         </div>
       </div>
 
-      {/* Risk Warning */}
-      <div className="bg-gray-800 border-2 border-yellow-600 p-4">
-        <div className="flex items-start space-x-3">
-          <span className="text-yellow-400 text-lg">⚠️</span>
+      {/* Risk Disclaimer */}
+      <div className="bg-gray-800 rounded-lg border border-yellow-600 p-3">
+        <div className="flex items-start space-x-2">
+          <span className="text-yellow-400 text-sm mt-0.5">⚠️</span>
           <div>
-            <h5 className="text-yellow-400 font-semibold text-sm">Risk Disclaimer</h5>
+            <h5 className="text-yellow-400 font-semibold text-xs">Risk Disclaimer</h5>
             <p className="text-gray-300 text-xs mt-1 leading-relaxed">
-              Option pricing is subject to market volatility and model assumptions. 
-              Past performance does not guarantee future results. Please consult with 
-              your risk management team before trading.
+              Option pricing subject to market volatility and model assumptions.
             </p>
           </div>
         </div>

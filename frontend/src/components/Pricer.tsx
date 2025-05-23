@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import PricingForm from './pricing/PricingForm';
 import PricingResults from './pricing/PricingResults';
 import PricingSidebar from './pricing/PricingSidebar';
-import { getPhysicalDealById, getCompatibleModels } from './config/pricingConfig';
+import { getPhysicalDealById, getCompatibleModels } from '../config/pricingConfig';
 
 export interface PricingConfig {
   // Deal Type

@@ -10,11 +10,11 @@ interface AdvancedSettingsProps {
 
 const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({ config, onConfigChange }) => {
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Monte Carlo Settings */}
       <div>
-        <h4 className="text-md font-semibold text-white mb-4">Monte Carlo Simulation</h4>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <h4 className="text-sm font-semibold text-white mb-2">Monte Carlo Simulation</h4>
+        <div className="grid grid-cols-3 gap-3">
           <FormField
             label="Run Monte Carlo"
             type="select"
@@ -24,6 +24,7 @@ const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({ config, onConfigCha
               { value: 'true', label: 'Yes' },
               { value: 'false', label: 'No' }
             ]}
+            size="sm"
           />
 
           <FormField
@@ -36,6 +37,7 @@ const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({ config, onConfigCha
             step={1000}
             disabled={!config.run_monte_carlo}
             helperText="More paths = higher accuracy"
+            size="sm"
           />
 
           <FormField
@@ -47,42 +49,26 @@ const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({ config, onConfigCha
             max={999999}
             disabled={!config.run_monte_carlo}
             helperText="For reproducible results"
+            size="sm"
           />
         </div>
       </div>
 
-      {/* Performance Warning */}
-      {config.run_monte_carlo && config.mc_paths > 50000 && (
-        <div className="p-4 bg-yellow-900 bg-opacity-30 border-2 border-yellow-600 text-yellow-200">
-          <div className="flex items-center space-x-2">
-            <span className="text-yellow-400">⚠️</span>
-            <div>
-              <p className="font-medium">High Path Count Warning</p>
-              <p className="text-sm text-yellow-300">
-                Using {config.mc_paths.toLocaleString()} paths may take several minutes to compute.
-                Consider using 10,000-25,000 paths for faster results.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Computational Complexity Info */}
-      <div className="p-4 bg-gray-750 border-2 border-gray-600">
-        <h5 className="text-sm font-semibold text-white mb-2">Computational Complexity</h5>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-gray-400">
+      {/* Performance Metrics */}
+      <div className="p-3 bg-gray-750 rounded-md">
+        <div className="grid grid-cols-3 gap-3 text-xs">
           <div>
-            <span className="text-gray-300">Estimated Runtime:</span>
-            <div className="mt-1">
+            <span className="text-gray-400">Runtime:</span>
+            <div className="text-white font-medium">
               {config.run_monte_carlo 
-                ? `~${Math.ceil(config.mc_paths / 5000)} seconds`
-                : '< 1 second (Analytical)'
+                ? `~${Math.ceil(config.mc_paths / 5000)}s`
+                : '< 1s'
               }
             </div>
           </div>
           <div>
-            <span className="text-gray-300">Memory Usage:</span>
-            <div className="mt-1">
+            <span className="text-gray-400">Memory:</span>
+            <div className="text-white font-medium">
               {config.run_monte_carlo 
                 ? `~${Math.ceil(config.mc_paths * config.num_options / 1000)} MB`
                 : '< 1 MB'
@@ -90,11 +76,11 @@ const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({ config, onConfigCha
             </div>
           </div>
           <div>
-            <span className="text-gray-300">Accuracy:</span>
-            <div className="mt-1">
+            <span className="text-gray-400">Accuracy:</span>
+            <div className="text-white font-medium">
               {config.run_monte_carlo 
-                ? `±${(1.96 / Math.sqrt(config.mc_paths) * 100).toFixed(3)}%`
-                : 'Exact (Analytical)'
+                ? `±${(1.96 / Math.sqrt(config.mc_paths) * 100).toFixed(2)}%`
+                : 'Exact'
               }
             </div>
           </div>

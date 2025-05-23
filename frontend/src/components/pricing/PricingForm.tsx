@@ -4,6 +4,7 @@ import { PricingConfig } from '../Pricer';
 import ContractSpecifications from './ContractSpecifications';
 import DeliverySchedule from './DeliverySchedule';
 import PricingParameters from './PricingParameters';
+import ModelParameters from './ModelParameters';
 import AdvancedSettings from './AdvancedSettings';
 
 interface PricingFormProps {
@@ -15,7 +16,7 @@ const PricingForm: React.FC<PricingFormProps> = ({ config, onConfigChange }) => 
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       {/* Contract Specifications */}
       <ContractSpecifications 
         config={config} 
@@ -35,20 +36,17 @@ const PricingForm: React.FC<PricingFormProps> = ({ config, onConfigChange }) => 
       />
 
       {/* Advanced Settings Toggle */}
-      <div className="bg-gray-800 border-2 border-gray-700 p-6">
+      <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
         <button
           onClick={() => setShowAdvanced(!showAdvanced)}
           className="w-full flex items-center justify-between text-left"
         >
-          <div className="flex items-center space-x-3">
-            <span className="text-2xl">⚙️</span>
-            <div>
-              <h3 className="text-lg font-semibold text-white">Advanced Settings</h3>
-              <p className="text-gray-400 text-sm">Monte Carlo configuration and additional parameters</p>
-            </div>
+          <div>
+            <h3 className="text-base font-semibold text-white">Advanced Settings</h3>
+            <p className="text-gray-400 text-xs">Monte Carlo configuration and additional parameters</p>
           </div>
           <svg
-            className={`w-5 h-5 text-gray-400 transition-transform duration-200 ${
+            className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${
               showAdvanced ? 'transform rotate-180' : ''
             }`}
             fill="none"
@@ -60,7 +58,7 @@ const PricingForm: React.FC<PricingFormProps> = ({ config, onConfigChange }) => 
         </button>
 
         {showAdvanced && (
-          <div className="mt-6 pt-6 border-t-2 border-gray-700">
+          <div className="mt-4 pt-4 border-t border-gray-700">
             <AdvancedSettings 
               config={config} 
               onConfigChange={onConfigChange} 
