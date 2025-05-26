@@ -28,6 +28,7 @@ export interface PricingConfig {
   decision_days_prior: number;
   contract_type: string; // 'single' or 'term'
   frequency: string; // 'weekly', 'biweekly', 'monthly', etc.
+  pricing_date: string; // Date for fetching market data
   
   // Pricing
   pricing_model: string;
@@ -77,6 +78,7 @@ const Pricer: React.FC = () => {
     decision_days_prior: 21,
     pricing_model: 'bachelier',
     pricing_method: 'fixed_differential',
+    pricing_date: new Date().toISOString().split('T')[0], // Date for fetching market data
     total_cost_per_option: 0.70,
     primary_differential: 0.0,
     secondary_differential: -0.55,

@@ -174,10 +174,10 @@ class CSVDataFeedProvider(DataFeedProvider):
             return None
     
     def fetch_data(self, ticker: str, start_date: Union[str, date, datetime], 
-                  end_date: Union[str, date, datetime], field: str = 'PX_LAST',
-                  verbose: bool = False) -> pd.Series:
+                end_date: Union[str, date, datetime], field: str = 'PX_LAST',
+                verbose: bool = False) -> pd.Series:
         """
-        Fetch price data for a specific ticker from CSV with improved fallback behavior
+        Fetch price data for a specific ticker from CSV with improved data loading
         
         Args:
             ticker: The ticker symbol
@@ -229,63 +229,88 @@ class CSVDataFeedProvider(DataFeedProvider):
         start_dt = pd.to_datetime(start_date)
         end_dt = pd.to_datetime(end_date)
         
-        # Set up filtering conditions
-        has_date = 'DATE' in df.columns
-        has_id = 'ID' in df.columns
-        
-        if has_date:
-            # Filter by date
-            df = df[(df['DATE'] >= start_dt) & (df['DATE'] <= end_dt)]
+        # IMPORTANT FIX: Ensure the DataFrame has a DATE column
+        if 'DATE' in df.columns:
+            # Ensure DATE is datetime
+            df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
+            
+            # Filter by date - Select data on or before the end_date
+            # This is the key change - we're looking for data UP TO the pricing date
+            df_filtered = df[df['DATE'] <= end_dt].copy()
             
             if verbose:
-                logger.info(f"After date filter: {len(df)} rows")
+                logger.info(f"After date filter: {len(df_filtered)} rows")
+                
+            if len(df_filtered) == 0:
+                logger.warning(f"No data found for {ticker} before {end_dt}")
+                # Instead of failing, let's return the most recent data available
+                df_filtered = df.copy()
+        else:
+            # If no DATE column, keep all data
+            df_filtered = df.copy()
+            logger.warning(f"No DATE column found in data for {ticker}, using all available data")
         
-        if has_id:
-            # Filter by ID
-            df = df[df['ID'] == expected_id]
+        # Filter by ID if needed
+        if 'ID' in df_filtered.columns:
+            # First try exact match
+            exact_match = df_filtered[df_filtered['ID'] == expected_id]
+            
+            if len(exact_match) > 0:
+                df_filtered = exact_match
+            else:
+                # Try partial match if no exact match found
+                # For example, if looking for THE_M01, try to find rows where ID contains 'THE'
+                base_match = df_filtered[df_filtered['ID'].str.contains(base_ticker, na=False)]
+                
+                if len(base_match) > 0:
+                    df_filtered = base_match
+                    logger.info(f"Using base ticker {base_ticker} data as fallback for {expected_id}")
+                else:
+                    logger.warning(f"No ID match for {expected_id} or {base_ticker}")
             
             if verbose:
-                logger.info(f"After ID filter: {len(df)} rows")
+                logger.info(f"After ID filter: {len(df_filtered)} rows")
         
         # Check if we have data after filtering
-        if len(df) == 0:
-            # Fall back to general ticker data if specific month contract not found
-            if '_M' in expected_id:
-                # Try to find data for the base ticker instead
-                base_id = expected_id.split('_M')[0]
-                
-                if has_id and base_id in df['ID'].values:
-                    df = df[df['ID'] == base_id]
-                    logger.info(f"Using base ticker {base_id} data as fallback for {expected_id}")
-                else:
-                    # As a last resort, create synthetic data
-                    logger.warning(f"No data found for {expected_id} or {base_id}, generating synthetic data")
-                    dates = pd.date_range(start=start_dt, end=end_dt, freq='B')
-                    synthetic_price = 10.0  # Default price
-                    df = pd.DataFrame({
-                        'DATE': dates,
-                        'PRICE': np.random.normal(synthetic_price, synthetic_price * 0.01, len(dates))
-                    })
-                    df = df.set_index('DATE')
-                    return df['PRICE']
+        if len(df_filtered) == 0:
+            logger.warning(f"No data found for {ticker} after filtering")
+            # Create synthetic data as fallback
+            synthetic_price = 10.0 + np.random.normal(0, 0.1)  # Default price with small random variation
+            dates = pd.date_range(start=start_dt, end=end_dt, freq='B')
+            result = pd.Series(
+                np.random.normal(synthetic_price, synthetic_price * 0.01, len(dates)), 
+                index=dates
+            )
+            logger.info(f"Generated synthetic data for {ticker}: {synthetic_price:.4f}")
+            return result
         
-        # Return PRICE series if we have data
-        if len(df) > 0 and 'PRICE' in df.columns:
-            # Remove duplicates by taking the last value for each date
-            if has_date:
-                df = df.drop_duplicates(subset=['DATE'], keep='last')
-                df = df.set_index('DATE')
+        # Get most recent data before the end date
+        if 'DATE' in df_filtered.columns:
+            df_filtered = df_filtered.sort_values('DATE', ascending=False)
+            latest_date = df_filtered['DATE'].iloc[0]
+            latest_data = df_filtered[df_filtered['DATE'] == latest_date]
             
             if verbose:
-                logger.info(f"Returning {len(df)} price points")
-                if len(df) > 0:
-                    logger.info(f"Price range: {df['PRICE'].min():.4f} to {df['PRICE'].max():.4f}")
+                logger.info(f"Using most recent data from {latest_date}")
+        else:
+            latest_data = df_filtered
+        
+        # Return PRICE series if we have data
+        if len(latest_data) > 0 and 'PRICE' in latest_data.columns:
+            # For time series, set the index to DATE if available
+            if 'DATE' in latest_data.columns:
+                latest_data = latest_data.set_index('DATE')
             
-            return df['PRICE']
+            if verbose:
+                logger.info(f"Returning {len(latest_data)} price points")
+                if len(latest_data) > 0:
+                    logger.info(f"Price range: {latest_data['PRICE'].min():.4f} to {latest_data['PRICE'].max():.4f}")
+            
+            return latest_data['PRICE']
         
         # If we reach here, we couldn't find appropriate data
-        logger.error(f"No usable data found for {ticker} after filtering")
-        raise ValueError(f"No data found for {ticker} in {self.data_folder}")
+        logger.error(f"No usable price data found for {ticker} after filtering")
+        raise ValueError(f"No usable price data found for {ticker} in {self.data_folder}")
     
     def fetch_forward_curve(self, base_ticker: str, num_months: int = 12,
                         curve_date: Optional[Union[str, date, datetime]] = None) -> pd.DataFrame:

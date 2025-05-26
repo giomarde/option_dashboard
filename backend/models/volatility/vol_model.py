@@ -1,12 +1,10 @@
-"""
-Volatility model implementation with improved error handling.
-"""
+# backend/models/volatility/vol_model.py
 
-import numpy as np
-import pandas as pd
 from datetime import datetime, timedelta
 import logging
 from typing import Dict, List, Optional, Union, Tuple
+import numpy as np
+import pandas as pd
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,13 +25,9 @@ class VolatilityModel:
         """
         self.data_provider = data_provider
         self.historical_data_cache = {}  # Cache for historical data
-        self.heston_params = {
-            "v0": 0.04,     # Initial variance
-            "kappa": 1.5,   # Mean reversion speed
-            "theta": 0.04,  # Long-run variance
-            "sigma": 0.3,   # Vol of vol
-            "rho": -0.7     # Correlation
-        }
+        
+        # Create an instance of the SpreadVolatilityModel for calculating spread volatilities
+        self.spread_vol_model = SpreadVolatilityModel()
         
         # Default volatilities to use when historical data is not available
         self.default_volatilities = {
@@ -79,7 +73,7 @@ class VolatilityModel:
                     start_date_str = historical_start.strftime('%Y-%m-%d')
                     end_date_str = evaluation_date.strftime('%Y-%m-%d')
                     
-                    # Fetch historical data
+                    # Fetch historical data - only load data, no vol calculation
                     historical_data[index] = self.data_provider.fetch_data(
                         index, start_date_str, end_date_str)
                 else:
@@ -95,293 +89,85 @@ class VolatilityModel:
                 historical_data[index] = pd.Series(
                     np.random.normal(10, 0.5, len(dates)), index=dates)
         
-        # Calculate individual volatilities
+        # Calculate individual volatilities using SpreadVolatilityModel
         individual_vols = {}
         for index in indices:
-            individual_vols[index] = self.estimate_volatility(
-                historical_data[index], delivery_date, index=index)
+            # Use SpreadVolatilityModel for individual vol calculation
+            vol = self.spread_vol_model.get_volatility_from_historical_data(
+                historical_data[index], 
+                pd.Series(),  # Empty series for second asset (not needed for single index)
+                delivery_date
+            )
+            individual_vols[index] = vol
         
-        # Calculate spread volatilities for all pairs
+        # Calculate spread volatilities for all pairs and their smiles
         spread_vols = {}
+        volatility_smiles = {}
+        
         if len(indices) > 1:
             for i, index1 in enumerate(indices):
+                # Add individual smile
+                try:
+                    price1 = historical_data[index1].iloc[-1] if len(historical_data[index1]) > 0 else 10.0
+                    volatility_smiles[index1] = self.generate_volatility_smile(
+                        individual_vols[index1], price1
+                    )
+                except Exception as e:
+                    logger.error(f"Error generating smile for {index1}: {e}")
+                
                 for j, index2 in enumerate(indices):
                     if i < j:  # Avoid duplicate pairs and self-pairs
                         spread_name = f"{index1}-{index2}"
-                        spread_vols[spread_name] = self.estimate_spread_volatility(
-                            historical_data[index1], 
-                            historical_data[index2],
-                            delivery_date,
-                            index1=index1,
-                            index2=index2
-                        )
+                        
+                        # Use SpreadVolatilityModel for spread vol calculation
+                        try:
+                            vol = self.spread_vol_model.get_volatility_from_historical_data(
+                                historical_data[index1],
+                                historical_data[index2],
+                                delivery_date
+                            )
+                            spread_vols[spread_name] = vol
+                            
+                            # Calculate the current spread value
+                            price1 = historical_data[index1].iloc[-1] if len(historical_data[index1]) > 0 else 10.0
+                            price2 = historical_data[index2].iloc[-1] if len(historical_data[index2]) > 0 else 9.0
+                            spread_price = price1 - price2
+                            
+                            # Generate volatility smile for the spread
+                            volatility_smiles[spread_name] = self.generate_volatility_smile(
+                                vol, spread_price
+                            )
+                        except Exception as e:
+                            logger.error(f"Error calculating spread vol for {spread_name}: {e}")
+                            spread_vols[spread_name] = 0.35  # Default fallback
+                            
+                            # Generate default smile
+                            price1 = historical_data[index1].iloc[-1] if len(historical_data[index1]) > 0 else 10.0
+                            price2 = historical_data[index2].iloc[-1] if len(historical_data[index2]) > 0 else 9.0
+                            spread_price = price1 - price2
+                            volatility_smiles[spread_name] = self.generate_volatility_smile(
+                                0.35, spread_price
+                            )
+        else:
+            # Just one index, add its smile
+            index = indices[0]
+            try:
+                price = historical_data[index].iloc[-1] if len(historical_data[index]) > 0 else 10.0
+                volatility_smiles[index] = self.generate_volatility_smile(
+                    individual_vols[index], price
+                )
+            except Exception as e:
+                logger.error(f"Error generating smile for {index}: {e}")
         
         return {
             'individual': individual_vols,
-            'spreads': spread_vols
+            'spreads': spread_vols,
+            'smiles': volatility_smiles
         }
     
-    def estimate_volatility(self, price_series: pd.Series, 
-                           delivery_date: datetime,
-                           annualize: bool = True,
-                           index: str = None) -> float:
-        """
-        Estimate volatility for a single index.
-        
-        Args:
-            price_series: Historical price series
-            delivery_date: Delivery date
-            annualize: Whether to annualize the volatility
-            index: The index name (for fallback defaults)
-            
-        Returns:
-            Estimated volatility
-        """
-        # Check if we have enough data
-        if price_series is None or len(price_series) < 2:
-            logger.warning(f"Insufficient data for volatility calculation for {index}, using default")
-            # Use default volatility if index is provided, otherwise use a general default
-            if index and index in self.default_volatilities:
-                return self.default_volatilities[index]
-            return 0.3  # Default volatility
-        
-        try:
-            # Make sure the series is sorted
-            price_series = price_series.sort_index()
-            
-            # Calculate log returns (for Black-Scholes) or price changes (for Bachelier)
-            # Here we're using log returns as a general approach
-            # First check if there are any non-positive values
-            if (price_series <= 0).any():
-                # Use price changes instead of log returns for Bachelier model
-                returns = price_series.diff().dropna()
-                
-                # Use absolute values for volatility calculation
-                if returns.abs().mean() > 0:
-                    vol = returns.std() / returns.abs().mean()
-                else:
-                    # Fallback if mean is zero
-                    vol = returns.std()
-                    if vol == 0:
-                        logger.warning(f"Zero standard deviation for {index}, using default")
-                        if index and index in self.default_volatilities:
-                            return self.default_volatilities[index]
-                        return 0.3
-            else:
-                # Use log returns for Black-Scholes style calculation
-                returns = np.log(price_series / price_series.shift(1)).dropna()
-                
-                # Calculate volatility
-                vol = returns.std()
-                
-                # If volatility is zero or nan, use default
-                if vol == 0 or np.isnan(vol):
-                    logger.warning(f"Zero or NaN volatility for {index}, using default")
-                    if index and index in self.default_volatilities:
-                        return self.default_volatilities[index]
-                    return 0.3
-            
-            # Annualize if requested (assuming 252 trading days)
-            if annualize:
-                vol = vol * np.sqrt(252)
-            
-            # Apply seasonal adjustment
-            delivery_month = delivery_date.month
-            seasonal_factor = 1.0
-            
-            # Typically winter months (Dec-Feb) have higher volatility
-            if delivery_month in [12, 1, 2]:
-                seasonal_factor = 1.2
-            # Shoulder months (Mar-Apr, Oct-Nov) have moderate volatility  
-            elif delivery_month in [3, 4, 10, 11]:
-                seasonal_factor = 1.1
-            # Summer months (May-Sep) have lower volatility
-            else:
-                seasonal_factor = 0.9
-            
-            vol = vol * seasonal_factor
-            
-            # Apply term structure adjustment
-            days_to_delivery = (delivery_date - datetime.now()).days
-            if days_to_delivery > 0:
-                time_to_maturity = days_to_delivery / 365
-                # Avoid division by zero
-                if time_to_maturity > 0:
-                    term_factor = np.sqrt((1 - np.exp(-2 * 0.5 * time_to_maturity)) / (2 * 0.5 * time_to_maturity))
-                    vol = vol * term_factor
-            
-            # Cap the volatility to reasonable levels
-            vol = min(max(0.1, vol), 0.8)
-            
-            return vol
-        except Exception as e:
-            logger.error(f"Error calculating volatility for {index}: {e}")
-            # Use default volatility if index is provided, otherwise use a general default
-            if index and index in self.default_volatilities:
-                return self.default_volatilities[index]
-            return 0.3  # Default fallback volatility
-    
-    def estimate_spread_volatility(self, price_series1: pd.Series, 
-                                  price_series2: pd.Series,
-                                  delivery_date: datetime,
-                                  correlation: Optional[float] = None,
-                                  index1: str = None,
-                                  index2: str = None) -> float:
-        """
-        Estimate volatility for a spread between two indices.
-        
-        Args:
-            price_series1: Historical price series for first index
-            price_series2: Historical price series for second index
-            delivery_date: Delivery date
-            correlation: Optional correlation override
-            index1: The first index name (for fallback defaults)
-            index2: The second index name (for fallback defaults)
-            
-        Returns:
-            Estimated spread volatility
-        """
-        # Get individual volatilities with fallback
-        vol1 = self.estimate_volatility(price_series1, delivery_date, index=index1)
-        vol2 = self.estimate_volatility(price_series2, delivery_date, index=index2)
-        
-        # Check if we have enough data for both series
-        if price_series1 is None or price_series2 is None or len(price_series1) < 2 or len(price_series2) < 2:
-            logger.warning(f"Insufficient data for spread volatility calculation between {index1} and {index2}, using individual vols")
-            
-            # If correlation is not provided, use a default value
-            if correlation is None:
-                correlation = 0.7  # Default high correlation for energy markets
-            
-            # Calculate spread volatility using individual volatilities and correlation
-            spread_vol = np.sqrt(vol1**2 + vol2**2 - 2 * correlation * vol1 * vol2)
-            
-            # Cap the volatility to reasonable levels
-            spread_vol = min(max(0.1, spread_vol), 0.8)
-            
-            return spread_vol
-        
-        try:
-            # Make sure the series are sorted
-            price_series1 = price_series1.sort_index()
-            price_series2 = price_series2.sort_index()
-            
-            # Align the series
-            combined = pd.DataFrame({
-                'asset1': price_series1,
-                'asset2': price_series2
-            })
-            combined = combined.dropna()
-            
-            if len(combined) < 2:
-                logger.warning(f"Insufficient aligned data for spread volatility calculation between {index1} and {index2}, using individual vols")
-                
-                # If correlation is not provided, use a default value
-                if correlation is None:
-                    correlation = 0.7  # Default high correlation for energy markets
-                
-                # Calculate spread volatility using individual volatilities and correlation
-                spread_vol = np.sqrt(vol1**2 + vol2**2 - 2 * correlation * vol1 * vol2)
-                
-                # Cap the volatility to reasonable levels
-                spread_vol = min(max(0.1, spread_vol), 0.8)
-                
-                return spread_vol
-            
-            # Calculate the spread
-            spread = combined['asset1'] - combined['asset2']
-            
-            # Method 1: Direct calculation from spread series
-            vol_direct = self.estimate_volatility(spread, delivery_date)
-            
-            # Method 2: Calculate from individual volatilities and correlation
-            # Check for non-positive values before taking log
-            if (combined['asset1'] <= 0).any() or (combined['asset2'] <= 0).any():
-                # Use price changes
-                returns1 = combined['asset1'].diff().dropna()
-                returns2 = combined['asset2'].diff().dropna()
-                
-                if len(returns1) > 0 and len(returns2) > 0:
-                    # Normalize by mean absolute value to get something like volatility
-                    if returns1.abs().mean() > 0:
-                        vol1 = returns1.std() / returns1.abs().mean()
-                    else:
-                        vol1 = returns1.std()
-                        
-                    if returns2.abs().mean() > 0:
-                        vol2 = returns2.std() / returns2.abs().mean()
-                    else:
-                        vol2 = returns2.std()
-                    
-                    # Annualize
-                    vol1 = vol1 * np.sqrt(252)
-                    vol2 = vol2 * np.sqrt(252)
-                    
-                    # Calculate correlation
-                    if correlation is None:
-                        # Check for constant series
-                        if returns1.std() > 0 and returns2.std() > 0:
-                            correlation = returns1.corr(returns2)
-                        else:
-                            correlation = 0.0
-                else:
-                    # Fallback to default correlation
-                    correlation = 0.7
-            else:
-                # Use log returns
-                returns1 = np.log(combined['asset1'] / combined['asset1'].shift(1)).dropna()
-                returns2 = np.log(combined['asset2'] / combined['asset2'].shift(1)).dropna()
-                
-                vol1 = returns1.std() * np.sqrt(252)
-                vol2 = returns2.std() * np.sqrt(252)
-                
-                if correlation is None:
-                    correlation = returns1.corr(returns2)
-            
-            # Calculate volatility from individual components
-            vol_from_components = np.sqrt(vol1**2 + vol2**2 - 2 * correlation * vol1 * vol2)
-            
-            # Blend the two methods
-            spread_vol = 0.7 * vol_direct + 0.3 * vol_from_components
-            
-            # Apply seasonal adjustment
-            delivery_month = delivery_date.month
-            seasonal_factor = 1.0
-            
-            # Typically winter months (Dec-Feb) have higher volatility
-            if delivery_month in [12, 1, 2]:
-                seasonal_factor = 1.2
-            # Shoulder months (Mar-Apr, Oct-Nov) have moderate volatility  
-            elif delivery_month in [3, 4, 10, 11]:
-                seasonal_factor = 1.1
-            # Summer months (May-Sep) have lower volatility
-            else:
-                seasonal_factor = 0.9
-            
-            spread_vol = spread_vol * seasonal_factor
-            
-            # Cap the volatility to reasonable levels
-            spread_vol = min(max(0.1, spread_vol), 0.8)
-            
-            return spread_vol
-        except Exception as e:
-            logger.error(f"Error calculating spread volatility between {index1} and {index2}: {e}")
-            
-            # If correlation is not provided, use a default value
-            if correlation is None:
-                correlation = 0.7  # Default high correlation for energy markets
-            
-            # Calculate spread volatility using individual volatilities and correlation
-            spread_vol = np.sqrt(vol1**2 + vol2**2 - 2 * correlation * vol1 * vol2)
-            
-            # Cap the volatility to reasonable levels
-            spread_vol = min(max(0.1, spread_vol), 0.8)
-            
-            return spread_vol
-    
     def generate_volatility_smile(self, base_vol: float, 
-                                 base_price: float,
-                                 strikes: Optional[List[float]] = None) -> List[Dict[str, float]]:
+                               base_price: float,
+                               strikes: Optional[List[float]] = None) -> List[Dict[str, float]]:
         """
         Generate a volatility smile around a base volatility.
         
@@ -431,53 +217,331 @@ class VolatilityModel:
         return smile
     
     def get_volatility_surface(self, indices: List[str],
-                              evaluation_date: Union[str, datetime],
-                              delivery_date: Union[str, datetime],
-                              base_prices: Optional[Dict[str, float]] = None) -> Dict[str, List[Dict[str, float]]]:
+                            evaluation_date: Union[str, datetime],
+                            delivery_date: Union[str, datetime],
+                            base_prices: Optional[Dict[str, float]] = None) -> Dict[str, List[Dict[str, float]]]:
         """
         Generate complete volatility surface data for indices and spreads.
-        
-        Args:
-            indices: List of index names
-            evaluation_date: Evaluation date
-            delivery_date: Delivery date
-            base_prices: Dictionary of current prices for indices
-            
-        Returns:
-            Dictionary with volatility smiles for all indices and spreads
         """
-        # Calculate base volatilities
-        vols = self.calculate_volatility(indices, evaluation_date, delivery_date)
-        
-        # If base prices not provided, create dummy values
-        if base_prices is None:
-            base_prices = {index: 10.0 for index in indices}
+        try:
+            # Calculate base volatilities
+            vols = self.calculate_volatility(indices, evaluation_date, delivery_date)
             
-            # Add spread prices
+            # If base prices not provided, create dummy values
+            if base_prices is None:
+                base_prices = {index: 10.0 for index in indices}
+                
+            # Add spread prices if not provided
             if len(indices) > 1:
                 for i, index1 in enumerate(indices):
                     for j, index2 in enumerate(indices):
                         if i < j:  # Avoid duplicate pairs and self-pairs
                             spread_name = f"{index1}-{index2}"
-                            base_prices[spread_name] = base_prices[index1] - base_prices[index2]
+                            if spread_name not in base_prices and index1 in base_prices and index2 in base_prices:
+                                base_prices[spread_name] = base_prices[index1] - base_prices[index2]
+            
+            # Generate volatility smiles
+            result = {}
+            
+            # Individual indices
+            for index, vol in vols['individual'].items():
+                if index in base_prices:
+                    # Calculate appropriate strikes around the current price
+                    current_price = base_prices[index]
+                    strikes = [current_price * (1 + (i - 2) * 0.05) for i in range(5)]  # -10% to +10%
+                    result[index] = self.generate_volatility_smile(vol, current_price, strikes)
+            
+            # Spreads
+            for spread_name, vol in vols['spreads'].items():
+                if spread_name in base_prices:
+                    # Calculate appropriate strikes around the current spread
+                    current_spread = base_prices[spread_name]
+                    # For spreads, use absolute offsets since spreads can be close to zero
+                    spread_range = max(0.5, abs(current_spread) * 0.5)  # 50% of spread or 0.5, whichever is larger
+                    strikes = [current_spread + (i - 2) * spread_range/2 for i in range(5)]
+                    result[spread_name] = self.generate_volatility_smile(vol, current_spread, strikes)
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error in get_volatility_surface: {e}")
+            # Create a minimal set of fallback volatility smiles
+            fallback = {}
+            for index in indices:
+                fallback[index] = [
+                    {"strike": 10.0 * 0.9, "volatility": 0.33},
+                    {"strike": 10.0, "volatility": 0.30},
+                    {"strike": 10.0 * 1.1, "volatility": 0.33}
+                ]
+            
+            # Add a spread smile if needed
+            if len(indices) > 1:
+                spread_name = f"{indices[0]}-{indices[1]}"
+                fallback[spread_name] = [
+                    {"strike": 1.0 * 0.5, "volatility": 0.36},
+                    {"strike": 1.0, "volatility": 0.35},
+                    {"strike": 1.0 * 1.5, "volatility": 0.36}
+                ]
+            
+            return fallback
+
+
+class SpreadVolatilityModel:
+    """
+    Optimized class for modeling and forecasting spread volatility 
+    that reuses already fetched data
+    """
+    
+    def __init__(self):
+        self.model = None
+        self.model_results = None
+        self.model_params = None
+        self.historical_data_cache = {}  # Cache for historical data
+        self.heston_params = {
+            "v0": 0.04,     # Initial variance
+            "kappa": 1.5,   # Mean reversion speed
+            "theta": 0.04,  # Long-run variance
+            "sigma": 0.3,   # Vol of vol
+            "rho": -0.7     # Correlation
+        }
         
-        # Generate volatility smiles
-        result = {}
+    def get_volatility_from_historical_data(self, asset1_prices, asset2_prices, 
+                                        delivery_date, historical_length=365):
+        """
+        Calculate volatility from provided historical data with improved modeling
         
-        # Safety check for base_prices
-        for index, price in base_prices.items():
-            if price == 0:
-                logger.warning(f"Base price for {index} is zero, using default value of 1.0")
-                base_prices[index] = 1.0
+        Args:
+            asset1_prices (pd.Series): Historical prices for asset1
+            asset2_prices (pd.Series): Historical prices for asset2
+            delivery_date (datetime): Delivery date
+            historical_length (int): Days of historical data to use
+                
+        Returns:
+            float: Estimated volatility for the spread
+        """
+        try:
+            # Handle single asset case
+            if asset2_prices is None or len(asset2_prices) == 0:
+                return self.estimate_volatility_from_spread_series(asset1_prices)
+            
+            # Debug: Check input data shapes and types
+            logger.debug(f"asset1_prices type: {type(asset1_prices)}, len: {len(asset1_prices)}")
+            logger.debug(f"asset2_prices type: {type(asset2_prices)}, len: {len(asset2_prices)}")
+            
+            # Ensure both are pandas Series with datetime index
+            if not isinstance(asset1_prices, pd.Series):
+                logger.warning("asset1_prices is not a pandas Series, converting...")
+                asset1_prices = pd.Series(asset1_prices)
+                
+            if not isinstance(asset2_prices, pd.Series):
+                logger.warning("asset2_prices is not a pandas Series, converting...")
+                asset2_prices = pd.Series(asset2_prices)
+            
+            # Align the two series on the same dates
+            combined = pd.DataFrame({
+                'asset1': asset1_prices,
+                'asset2': asset2_prices
+            })
+            
+            # IMPORTANT FIX: Ensure the data is sorted by date index in descending order
+            # This ensures that 'most recent' actually means most recent chronologically
+            combined = combined.sort_index(ascending=False)
+            
+            # Debug: Print first few rows to verify data alignment and sorting
+            logger.debug(f"First 5 rows of combined data (after sorting):")
+            logger.debug(combined.head(5))
+            
+            # Drop any rows with missing values
+            combined_clean = combined.dropna()
+            logger.debug(f"After dropping NAs: {len(combined_clean)} rows")
+            
+            # Use last N days of data - now properly sorted by date
+            if len(combined_clean) > historical_length:
+                combined_clean = combined_clean.head(historical_length)  # Using head() now since index is descending
+                logger.debug(f"After limiting to most recent {historical_length} days: {len(combined_clean)} rows")
+            
+            # Check if we have enough data
+            if len(combined_clean) < 20:
+                logger.warning(f"Limited historical data ({len(combined_clean)} points). Using default volatility.")
+                return 0.3  # Default fallback for limited data
+            
+            # Calculate the spread between assets
+            spread_series = combined_clean['asset1'] - combined_clean['asset2']
+            
+            # Debug: Print spread statistics with date range
+            first_date = combined_clean.index.min().strftime('%Y-%m-%d')
+            last_date = combined_clean.index.max().strftime('%Y-%m-%d')
+            logger.debug(f"Spread series statistics ({first_date} to {last_date}):")
+            logger.debug(f"Mean: {spread_series.mean()}, Min: {spread_series.min()}, Max: {spread_series.max()}")
+            logger.debug(f"First 5 spread values (most recent first): {spread_series.head(5).tolist()}")
+            
+            # Get historical spread volatility with 20-day and 60-day windows
+            # Using the most recent data now due to proper sorting
+            vol_20d = self.estimate_volatility_from_spread_series(spread_series.head(min(20, len(spread_series))))
+            vol_60d = self.estimate_volatility_from_spread_series(spread_series.head(min(60, len(spread_series))))
+            
+            # Debug: Print raw volatility calculations
+            logger.debug(f"Raw vol_20d: {vol_20d}, Raw vol_60d: {vol_60d}")
+            
+            # Blend volatilities (more weight to recent data)
+            base_vol = 0.5 * vol_20d + 0.5 * vol_60d
+            
+            # Apply seasonal adjustment based on delivery month
+            delivery_month = delivery_date.month
+            seasonal_factor = 1.0
+            
+            # Typically winter months (Dec-Feb) have higher volatility
+            if delivery_month in [12, 1, 2]:
+                seasonal_factor = 1.2
+            # Shoulder months (Mar-Apr, Oct-Nov) have moderate volatility  
+            elif delivery_month in [3, 4, 10, 11]:
+                seasonal_factor = 1.1
+            # Summer months (May-Sep) have lower volatility
+            else:
+                seasonal_factor = 0.9
+            
+            # Calculate days to delivery and apply term structure adjustment
+            days_to_delivery = (delivery_date - datetime.now()).days
+            
+            if days_to_delivery > 0:
+                time_to_maturity = days_to_delivery / 365
+                vol = self.calculate_term_structure(base_vol, [time_to_maturity])[0]
+                
+                # Apply a reasonableness cap (don't let vol exceed 0.8 in absolute terms)
+                vol = min(vol, 0.8)
+            else:
+                vol = min(base_vol, 0.8)
+            
+            use_heston = True
+            if use_heston and days_to_delivery > 0:
+                spread_start = spread_series.iloc[0]
+                time_to_maturity = max(days_to_delivery / 365, 1 / 252)  # Avoid division by 0
+
+                # Show vols at surrounding levels to visualize the smile
+                logger.debug("Heston implied vol smile:")
+                for pct in [-0.1, -0.05, 0.0, 0.05, 0.1]:
+                    S_test = spread_start * (1 + pct)
+                    vol_test = self.simulate_heston_volatility(S0=S_test, T=time_to_maturity)
+                    logger.debug(f"  Spread: {S_test:.4f} ({pct:+.0%}), Implied Vol: {vol_test:.4f}")
+
+                # Use the base spread for final vol
+                heston_vol = self.simulate_heston_volatility(S0=spread_start, T=time_to_maturity)
+                logger.debug(f"Heston implied vol at current spread ({spread_start:.4f}): {heston_vol:.4f}")
+                vol = min(heston_vol, 0.8)
+
+            # Diagnostic prints
+            logger.info(f"Volatility calculation for delivery {delivery_date.strftime('%b-%Y')}:")
+            logger.info(f"  20-day vol: {vol_20d:.4f}")
+            logger.info(f"  60-day vol: {vol_60d:.4f}")
+            logger.info(f"  Base vol: {base_vol:.4f}")
+            logger.info(f"  Seasonal factor: {seasonal_factor:.2f}")
+            logger.info(f"  Days to delivery: {days_to_delivery}")
+            logger.info(f"  Final vol: {vol:.4f}")
+
+            return vol
+            
+        except Exception as e:
+            logger.error(f"Error calculating volatility from historical data: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0.3  # Default fallback
+    
+    def estimate_volatility_from_spread_series(self, spread_series, annualize=True):
+        """
+        Calculate volatility directly from spread time series
         
-        # Individual indices
-        for index, vol in vols['individual'].items():
-            if index in base_prices:
-                result[index] = self.generate_volatility_smile(vol, base_prices[index])
+        Args:
+            spread_series (pd.Series): Time series of spread values
+            annualize (bool): Whether to annualize the volatility
+            
+        Returns:
+            float: Estimated volatility
+        """
+        # Debug: Print input
+        logger.debug(f"estimate_volatility input: {len(spread_series)} points")
         
-        # Spreads
-        for spread_name, vol in vols['spreads'].items():
-            if spread_name in base_prices:
-                result[spread_name] = self.generate_volatility_smile(vol, base_prices[spread_name])
+        # IMPORTANT FIX: Ensure data is sorted chronologically for proper differencing
+        # For proper price changes, we need to calculate day-to-day changes
+        # This requires chronological ordering (ascending by date)
+        spread_series_chrono = spread_series.sort_index()
         
-        return result
+        # For Bachelier model, use absolute changes
+        spread_changes = spread_series_chrono.diff().dropna()
+        
+        # Debug: Print changes
+        logger.debug(f"First 5 spread changes: {spread_changes.head(5).tolist()}")
+        logger.debug(f"Spread changes stats: Mean={spread_changes.mean()}, Std={spread_changes.std()}")
+        
+        # Calculate volatility (standard deviation of changes)
+        vol = spread_changes.std()
+        
+        # Annualize if requested (assuming 252 trading days)
+        if annualize:
+            vol = vol * np.sqrt(252)
+        
+        # IMPORTANT FIX: Return the volatility as a decimal, not a percentage
+        vol = vol / 100.0  # Convert from percentage to decimal
+        
+        logger.debug(f"Calculated volatility: {vol}")
+        
+        return vol
+    
+    def calculate_term_structure(self, base_vol, maturities, mean_reversion=0.5):
+        """
+        Calculate the term structure of volatility
+        
+        Args:
+            base_vol (float): Base volatility (annualized)
+            maturities (list): List of maturities in years
+            mean_reversion (float): Mean reversion rate
+            
+        Returns:
+            np.array: Term structure of volatilities
+        """
+        vol_term = []
+        
+        for T in maturities:
+            if T <= 0:
+                vol_term.append(base_vol)
+            else:
+                # Calculate term structure with mean reversion
+                term_factor = np.sqrt((1 - np.exp(-2 * mean_reversion * T)) / (2 * mean_reversion * T))
+                vol_term.append(base_vol * term_factor)
+        
+        return np.array(vol_term)
+    
+    def simulate_heston_volatility(self, S0, T, steps=252, n_paths=1000):
+        """
+        Simulates Heston model paths and returns the implied volatility
+        
+        Args:
+            S0 (float): Initial spread value
+            T (float): Time to maturity in years
+            steps (int): Time steps per year
+            n_paths (int): Number of Monte Carlo paths
+        
+        Returns:
+            float: Implied volatility (standard deviation of log returns)
+        """
+        dt = T / steps
+        v0 = self.heston_params["v0"]
+        kappa = self.heston_params["kappa"]
+        theta = self.heston_params["theta"]
+        sigma = self.heston_params["sigma"]
+        rho = self.heston_params["rho"]
+        
+        v = np.full((n_paths,), v0)
+        S = np.full((n_paths,), S0)
+
+        for _ in range(steps):
+            z1 = np.random.normal(size=n_paths)
+            z2 = np.random.normal(size=n_paths)
+            dw1 = z1
+            dw2 = rho * z1 + np.sqrt(1 - rho**2) * z2
+
+            v = np.abs(v + kappa * (theta - v) * dt + sigma * np.sqrt(v * dt) * dw2)
+            S = S * np.exp(-0.5 * v * dt + np.sqrt(v * dt) * dw1)
+        
+        log_returns = np.log(S / S0)
+        implied_vol = np.std(log_returns) / np.sqrt(T)
+        
+        return implied_vol

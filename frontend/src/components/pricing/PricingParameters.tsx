@@ -105,6 +105,15 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
           disabled={config.pricing_method === 'fair_value'}
           size="sm"
         />
+
+        <FormField
+          label="Pricing Date"
+          type="date"
+          value={config.pricing_date}
+          onChange={(value) => onConfigChange('pricing_date', value)}
+          size="sm"
+          helperText="Date for market data pricing"
+        />
       </div>
 
       {/* Strike Price Calculation */}
