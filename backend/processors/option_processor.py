@@ -172,9 +172,9 @@ class OptionProcessor:
                 spread = round(primary_price - secondary_price, 4)
                 market_data['forward_spreads'].append(spread)
         
-        # IMPORTANT CHANGE: Now we separate volatility calculation from data loading
+        # Calculate volatilities separately from data loading
         try:
-            # Initialize vol_surface as empty dict first to avoid the unbound variable error
+            # Initialize vol_surface as empty dict first to avoid unbound variable error
             vol_surface = {}
             
             from models.volatility import VolatilityModel
@@ -224,49 +224,66 @@ class OptionProcessor:
                         spread_key = f"{primary_index}-{secondary_index}"
                         logger.info(f"Looking for spread volatility with key: {spread_key}")
                         
-                        if spread_key in vol_surface and vol_surface[spread_key]:
-                            # Log the spread volatility structure
-                            logger.info(f"Spread volatility data: {vol_surface[spread_key][:2]}...")
+                    if spread_key in vol_surface and vol_surface[spread_key]:
+                        # Log the spread volatility structure
+                        logger.info(f"Spread volatility data: {vol_surface[spread_key][:2]}...")
+                        
+                        # Find volatility for the strike
+                        if market_data['forward_spreads']:
+                            spread_val = market_data['forward_spreads'][0]
+                            logger.info(f"Forward spread value: {spread_val}")
+                            logger.info(f"Strike value: {strike}")
                             
-                            # Find volatility for the strike
-                            if market_data['forward_spreads']:
-                                spread_val = market_data['forward_spreads'][0]
-                                logger.info(f"Forward spread value: {spread_val}")
-                                logger.info(f"Strike value: {strike}")
-                                
-                                # Default to first vol point
-                                closest_vol = vol_surface[spread_key][0]['volatility']
-                                closest_strike = vol_surface[spread_key][0]['strike']
-                                
-                                # Find the closest strike to the actual strike price
-                                min_distance = float('inf')
-                                for vol_point in vol_surface[spread_key]:
-                                    distance = abs(vol_point['strike'] - strike)
-                                    if distance < min_distance:
-                                        min_distance = distance
-                                        closest_vol = vol_point['volatility']
-                                        closest_strike = vol_point['strike']
-                                
-                                logger.info(f"Found closest volatility {closest_vol} at strike {closest_strike} (target strike: {strike})")
-                                market_data['spread_volatilities'] = [round(closest_vol, 4)] * len(delivery_dates)
-                                
-                                # Store annualized normal volatility for displaying in UI
-                                market_data['annualized_normal'] = round(closest_vol, 4)
-                                
-                                # Calculate percentage volatility (normal vol / price)
-                                if spread_val != 0:
-                                    market_data['percentage_vol'] = round(closest_vol / abs(spread_val) * 100, 2)
-                                else:
-                                    market_data['percentage_vol'] = round(closest_vol * 100, 2)
+                            # Find the exact strike volatility point - must be present due to our generate_volatility_smile implementation
+                            strike_vol_point = None
+                            for vol_point in vol_surface[spread_key]:
+                                if abs(vol_point['strike'] - strike) < 0.0001:  # Nearly exact match
+                                    strike_vol_point = vol_point
+                                    break
+                            
+                            if not strike_vol_point:
+                                logger.warning(f"No volatility point found at strike {strike}. This should not happen with proper smile generation!")
+                                # Fallback to closest point
+                                closest_point = min(vol_surface[spread_key], key=lambda p: abs(p['strike'] - strike))
+                                strike_vol_point = closest_point
+                            
+                            # Get volatility at the strike
+                            # Get volatility at the strike
+                            closest_vol = strike_vol_point['volatility']
+                            closest_strike = strike_vol_point['strike']
+
+                            logger.info(f"Found volatility {closest_vol} at strike {closest_strike}")
+                            market_data['spread_volatilities'] = [round(closest_vol, 4)] * len(delivery_dates)
+
+                            # Store annualized normal volatility for displaying in UI
+                            market_data['annualized_normal'] = round(closest_vol, 4)
+
+                            # Calculate percentage volatility (normal vol / price) correctly
+                            # Use absolute value of spread to avoid negative percentage volatilities
+                            if abs(spread_val) > 0.001:  # Avoid division by very small numbers
+                                percentage_vol = (closest_vol / abs(spread_val)) * 100
+                                market_data['percentage_vol'] = round(percentage_vol, 2)
+                                logger.info(f"Percentage vol = {closest_vol} / {abs(spread_val)} * 100 = {percentage_vol}%")
                             else:
-                                # If no forward spreads, use the middle volatility
-                                middle_idx = len(vol_surface[spread_key]) // 2
-                                middle_vol = vol_surface[spread_key][middle_idx]['volatility']
-                                logger.info(f"Using middle volatility: {middle_vol}")
-                                market_data['spread_volatilities'] = [round(middle_vol, 4)] * len(delivery_dates)
-                                market_data['annualized_normal'] = round(middle_vol, 4)
+                                # Fallback if spread is very close to zero
+                                market_data['percentage_vol'] = round(closest_vol * 100, 2)
+                                logger.info(f"Using direct percentage vol due to small spread: {market_data['percentage_vol']}%")
                         else:
-                            logger.warning(f"Spread key {spread_key} not found in volatility surface")
+                            # If no forward spreads, use the ATM volatility
+                            atm_points = [p for p in vol_surface[spread_key] if abs(p['strike'] - base_price) < 0.001]
+                            if atm_points:
+                                atm_vol = atm_points[0]['volatility']
+                            else:
+                                # Fallback to middle point
+                                middle_idx = len(vol_surface[spread_key]) // 2
+                                atm_vol = vol_surface[spread_key][middle_idx]['volatility']
+                                
+                            logger.info(f"Using ATM volatility: {atm_vol}")
+                            market_data['spread_volatilities'] = [round(atm_vol, 4)] * len(delivery_dates)
+                            market_data['annualized_normal'] = round(atm_vol, 4)
+                            market_data['percentage_vol'] = round(atm_vol * 100, 2)  # Default percent
+                    else:
+                        logger.warning(f"Spread key {spread_key} not found in volatility surface")
                 except Exception as e:
                     logger.error(f"Error generating volatility surface: {e}")
                     import traceback

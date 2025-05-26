@@ -4,6 +4,11 @@ Bachelier option pricing model implementation.
 
 import numpy as np
 from scipy.stats import norm
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class BachelierOptionPricer:
     """
@@ -16,7 +21,7 @@ class BachelierOptionPricer:
     
     def option_price(self, S0, K, T, sigma, option_type='call', r=0):
         """
-        Calculates the price of European option under Bachelier model
+        Calculates the price of European option under Bachelier model with improved handling
         
         Args:
             S0 (float): Current value of the underlying asset (or spread)
@@ -29,18 +34,30 @@ class BachelierOptionPricer:
         Returns:
             float: Option price
         """
+        # Sanity checks with verbose logging for debugging
+        logger.info(f"Calculating Bachelier price: S0={S0}, K={K}, T={T}, sigma={sigma}, type={option_type}")
+        
+        # Ensure minimum time to maturity to avoid numerical issues
+        if T <= 0.001:
+            logger.warning(f"Very small time to maturity ({T}), using minimum value of 0.001")
+            T = max(0.001, T)
+            
+        if sigma <= 0.01:
+            logger.warning(f"Very small volatility ({sigma}), using minimum value of 0.01")
+            sigma = max(0.01, sigma)
+        
         # Discount factor
         df = np.exp(-r * T)
         
         # Calculate d
-        if sigma * np.sqrt(T) > 0:
-            d = (S0 - K) / (sigma * np.sqrt(T))
+        volatility_term = sigma * np.sqrt(T)
+        d = (S0 - K) / volatility_term
+        
+        # Calculate intrinsic value for reference
+        if option_type.lower() == 'call':
+            intrinsic = max(0, S0 - K)
         else:
-            # Handle the case when T is very small or sigma is zero
-            if option_type.lower() == 'call':
-                return max(0, S0 - K)
-            else:
-                return max(0, K - S0)
+            intrinsic = max(0, K - S0)
         
         # Standard normal CDF and PDF
         Nd = norm.cdf(d)
@@ -48,15 +65,22 @@ class BachelierOptionPricer:
         
         # Option price calculation
         if option_type.lower() == 'call':
-            price = df * ((S0 - K) * Nd + sigma * np.sqrt(T) * nd)
+            price = df * ((S0 - K) * Nd + volatility_term * nd)
         else:  # put option
-            price = df * ((K - S0) * (1 - Nd) + sigma * np.sqrt(T) * nd)
+            price = df * ((K - S0) * (1 - Nd) + volatility_term * nd)
+        
+        # Sanity check - ensure option price isn't less than intrinsic value
+        if price < intrinsic:
+            logger.warning(f"Calculated price {price} less than intrinsic value {intrinsic}, using intrinsic")
+            price = intrinsic
             
+        logger.info(f"Option price: {price}, Intrinsic value: {intrinsic}")
+        
         return price
     
     def delta(self, S0, K, T, sigma, option_type='call', r=0):
         """
-        Calculates the delta of European option under Bachelier model
+        Calculates the delta of European option under Bachelier model with improved handling
         
         Args:
             S0 (float): Current value of the underlying asset (or spread)
@@ -69,21 +93,26 @@ class BachelierOptionPricer:
         Returns:
             float: Option delta
         """
+        # Ensure minimum values for numerical stability
+        T = max(0.001, T)
+        sigma = max(0.01, sigma)
+        
         df = np.exp(-r * T)
+        volatility_term = sigma * np.sqrt(T)
+        d = (S0 - K) / volatility_term
         
-        if sigma * np.sqrt(T) <= 0:
-            # Edge case
-            if option_type.lower() == 'call':
-                return 1.0 if S0 > K else 0.0
-            else:
-                return -1.0 if S0 < K else 0.0
-        
-        d = (S0 - K) / (sigma * np.sqrt(T))
-        
+        # Delta calculation with sign correction
         if option_type.lower() == 'call':
-            return df * norm.cdf(d)
+            delta_value = df * norm.cdf(d)
+            # Ensure call delta is positive
+            delta_value = max(0, delta_value)
         else:  # put option
-            return df * (norm.cdf(d) - 1)
+            delta_value = df * (norm.cdf(d) - 1)
+            # Ensure put delta is negative
+            delta_value = min(0, delta_value)
+        
+        logger.info(f"Calculated delta: {delta_value} for {option_type} option")
+        return delta_value
 
     def differential_delta(self, S0, K, T, sigma, option_type='call', r=0):
         """

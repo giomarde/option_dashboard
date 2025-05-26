@@ -166,15 +166,15 @@ class VolatilityModel:
         }
     
     def generate_volatility_smile(self, base_vol: float, 
-                                base_price: float,
-                                strikes: Optional[List[float]] = None,
-                                option_strike: Optional[float] = None) -> List[Dict[str, float]]:
+                                    base_price: float,
+                                    strikes: Optional[List[float]] = None,
+                                    option_strike: Optional[float] = None) -> List[Dict[str, float]]:
         """
-        Generate a volatility smile around a base volatility.
+        Generate a volatility smile around a base volatility with proper points.
         
         Args:
             base_vol: Base ATM volatility
-            base_price: Current price or spread value
+            base_price: Current price or spread value (forward)
             strikes: Optional list of strike prices
             option_strike: The actual option strike price (if available)
             
@@ -194,28 +194,38 @@ class VolatilityModel:
         center_price = option_strike if option_strike is not None else base_price
         
         if strikes is None:
-            # Generate more strikes over a wider range
-            # Use 2x the difference between center and base price to ensure wide enough range
-            range_width = max(0.3 * abs(center_price), abs(center_price - base_price) * 2, 0.3)
+            # For spread options, ensure we have at least 45 points focused around the strike and forward
+            # Determine the strike range based on the forward and strike price
+            range_min = min(center_price, base_price) - max(0.5, abs(center_price - base_price))
+            range_max = max(center_price, base_price) + max(0.5, abs(center_price - base_price))
             
-            # Create 9 points for a smoother smile
-            num_strikes = 9
+            # Create at least 45 points with concentration around the key values
+            num_points = 45
             
-            # Generate strikes around the center price
-            strikes = [round(center_price + (i - (num_strikes - 1) / 2) * range_width / (num_strikes - 1), 4) 
-                    for i in range(num_strikes)]
+            # Generate an array of strikes
+            strikes = []
             
-            # Make sure we have a point at exactly the center price and the base price
-            if center_price not in strikes:
-                strikes.append(round(center_price, 4))
-            if base_price not in strikes and center_price != base_price:
+            # Ensure both the strike and forward are in the list exactly
+            strikes.append(round(center_price, 4))
+            if abs(center_price - base_price) > 0.0001:  # Only add if different from center price
                 strikes.append(round(base_price, 4))
             
-            # Sort and remove duplicates
-            strikes = sorted(list(set(strikes)))
-                
-            # Log the strikes to verify ATM centering
-            logger.debug(f"Generated strikes around {center_price} (current spread: {base_price}): {strikes}")
+            # Distribute 43 remaining points (or 44 if strike=forward)
+            remaining_points = num_points - len(strikes)
+            
+            # Add points between range_min and range_max
+            step = (range_max - range_min) / (remaining_points + 1)
+            for i in range(remaining_points):
+                new_strike = range_min + step * (i + 1)
+                # Skip if too close to existing points
+                if all(abs(new_strike - s) > 0.001 for s in strikes):
+                    strikes.append(round(new_strike, 4))
+            
+            # Sort strikes
+            strikes.sort()
+            
+            logger.info(f"Generated {len(strikes)} volatility points from {strikes[0]} to {strikes[-1]}")
+            logger.info(f"Strike price: {center_price}, Forward price: {base_price}")
         
         # Generate volatility smile
         smile = []
@@ -235,17 +245,19 @@ class VolatilityModel:
             # Ensure vol is reasonable and round to 4 decimal places
             vol = round(min(max(0.1, vol), 0.8), 4)
             
+            # For relative_strike, use percentage difference from the center price
+            relative_strike = round(100 * (strike / center_price - 1), 2) if center_price != 0 else 0
+            
             smile.append({
                 'strike': strike,
                 'volatility': vol,
-                'relative_strike': round(100 * (strike / center_price - 1), 2) if center_price != 0 else 0  # Add relative strike as percentage
+                'relative_strike': relative_strike
             })
         
         # Sort by strike for proper display
         smile.sort(key=lambda x: x['strike'])
         
-        # Log the smile
-        logger.debug(f"Generated volatility smile for center price {center_price}: {smile}")
+        logger.info(f"Generated volatility smile with {len(smile)} points")
         
         return smile
     
