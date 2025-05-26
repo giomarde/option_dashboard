@@ -63,7 +63,9 @@ class BachelierSpreadOptionModel(BasePricingModel):
         secondary_differential = self.config.get('secondary_differential', 0.0)
         total_cost_per_option = self.config.get('total_cost_per_option', 0.0)
         
-        # Parse evaluation date
+        # Parse evaluation date and pricing date
+        pricing_date = market_data.get('pricing_date', datetime.now())
+        
         if isinstance(evaluation_date_str, str):
             evaluation_date = datetime.strptime(evaluation_date_str, '%Y-%m-%d')
         else:
@@ -71,16 +73,16 @@ class BachelierSpreadOptionModel(BasePricingModel):
         
         # Calculate delivery dates
         month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
         month_idx = month_names.index(first_delivery_month) + 1
         delivery_date = datetime(first_delivery_year, month_idx, delivery_day)
         
-        # Calculate decision date
+        # Calculate decision date (the option expiry)
         decision_date = delivery_date - timedelta(days=decision_days_prior)
         
-        # Calculate time to maturity in years
-        days_to_decision = (decision_date - evaluation_date).days
-        time_to_maturity = max(0, days_to_decision / 365.0)
+        # Calculate time to maturity in years from pricing date to decision date
+        days_to_decision = max(0, (decision_date - pricing_date).days)
+        time_to_maturity = max(0.001, days_to_decision / 365.0)  # Ensure minimum value to avoid numerical issues
         
         # Extract market data
         forward_spreads = market_data.get('forward_spreads', [0.0])
@@ -91,9 +93,15 @@ class BachelierSpreadOptionModel(BasePricingModel):
         # Calculate strike price
         strike = secondary_differential - primary_differential + total_cost_per_option
         
+        # Round values to 4 decimal places for cleaner calculations
+        forward_spreads = [round(s, 4) for s in forward_spreads]
+        volatilities = [round(v, 4) for v in volatilities]
+        strike = round(strike, 4)
+        time_to_maturity = round(time_to_maturity, 4)
+        
         logger.info(f"Prepared input data for Bachelier model: "
-                   f"S0={forward_spreads[0]}, K={strike}, T={time_to_maturity}, "
-                   f"vol={volatilities[0]}, type={option_type}")
+                f"S0={forward_spreads[0]}, K={strike}, T={time_to_maturity}, "
+                f"vol={volatilities[0]}, type={option_type}")
         
         return {
             'forward_spreads': forward_spreads,
@@ -127,6 +135,9 @@ class BachelierSpreadOptionModel(BasePricingModel):
         option_type = prepared_data['option_type']
         delivery_date = prepared_data['delivery_date']
         
+        # Log the key pricing inputs for debugging
+        logger.info(f"Pricing with parameters: S0={forward_spread}, K={strike}, T={time_to_maturity}, vol={volatility}, type={option_type}")
+        
         # Calculate option value
         option_value = self.pricer.option_price(
             S0=forward_spread,
@@ -138,6 +149,7 @@ class BachelierSpreadOptionModel(BasePricingModel):
         
         # Format the option date for the response
         option_date = delivery_date.strftime('%Y-%m-%d')
+        logger.info(f"Calculated option value: {option_value} for {option_date}")
         
         return {
             'total_value': option_value,

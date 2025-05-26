@@ -74,7 +74,7 @@ class OptionProcessor:
         option_type = config.get('option_type')
         evaluation_date_str = config.get('evaluation_date')
         
-        # NEW: Get pricing date from config
+        # Get pricing date from config
         pricing_date_str = config.get('pricing_date')
         
         # Create pricing_date for market data fetching
@@ -110,7 +110,7 @@ class OptionProcessor:
         # Initialize result structure
         market_data = {
             'evaluation_date': evaluation_date,
-            'pricing_date': pricing_date,  # NEW: Add pricing date to market data
+            'pricing_date': pricing_date,
             'delivery_dates': delivery_dates,
             'indices_data': {},
             'forward_curves': {},
@@ -124,12 +124,11 @@ class OptionProcessor:
             for index in indices:
                 try:
                     # 1. Get current price data
-                    # Use pricing_date_str instead of today's date
                     current_data = self.data_provider.fetch_market_data(
                         index, pricing_date_str)
                     market_data['indices_data'][index] = current_data
                     
-                    # 2. Get forward curve using pricing_date_str
+                    # 2. Get forward curve
                     forward_curve = self.data_provider.fetch_forward_curve(
                         index, 12, pricing_date_str)
                     market_data['forward_curves'][index] = forward_curve
@@ -169,12 +168,15 @@ class OptionProcessor:
                 if secondary_price == 0:
                     secondary_price = 9.0
                     
-                # Calculate spread
-                spread = primary_price - secondary_price
+                # Calculate spread and round to 4 decimal places
+                spread = round(primary_price - secondary_price, 4)
                 market_data['forward_spreads'].append(spread)
         
         # IMPORTANT CHANGE: Now we separate volatility calculation from data loading
         try:
+            # Initialize vol_surface as empty dict first to avoid the unbound variable error
+            vol_surface = {}
+            
             from models.volatility import VolatilityModel
             vol_model = VolatilityModel(self.data_provider)
             
@@ -193,15 +195,30 @@ class OptionProcessor:
                     base_prices = {idx: data.get('price', 10.0) for idx, data in market_data['indices_data'].items()}
                     logger.info(f"Base prices for volatility calculation: {base_prices}")
                     
+                    # Calculate the strike price
+                    strike = config.get('secondary_differential', 0) - config.get('primary_differential', 0) + config.get('total_cost_per_option', 0)
+                    strike = round(strike, 4)  # Round to 4 decimal places
+
+                    # Prepare option strikes dictionary for volatility model
+                    option_strikes = {}
+                    if option_type.startswith('vanilla_spread') and primary_index and secondary_index:
+                        spread_key = f"{primary_index}-{secondary_index}"
+                        option_strikes[spread_key] = strike
+                        
+                        # Add spread to base_prices if not already there
+                        if spread_key not in base_prices and primary_index in base_prices and secondary_index in base_prices:
+                            base_prices[spread_key] = round(base_prices[primary_index] - base_prices[secondary_index], 4)
+
                     # Generate volatility surfaces for all indices and the spread
                     vol_surface = vol_model.get_volatility_surface(
-                        indices, evaluation_date, delivery_dates[0], base_prices
+                        indices, evaluation_date, delivery_dates[0], base_prices, option_strikes
                     )
-                    market_data['volatilities'] = vol_surface
                     
-                    # Log the resulting volatility surface structure
+                    # Now we can safely log the volatility surface keys
                     logger.info(f"Volatility surface keys: {list(vol_surface.keys() if vol_surface else [])}")
                     
+                    market_data['volatilities'] = vol_surface
+                        
                     # Extract volatilities for each delivery date
                     if option_type.startswith('vanilla_spread') and primary_index and secondary_index:
                         spread_key = f"{primary_index}-{secondary_index}"
@@ -211,29 +228,43 @@ class OptionProcessor:
                             # Log the spread volatility structure
                             logger.info(f"Spread volatility data: {vol_surface[spread_key][:2]}...")
                             
-                            # Find ATM volatility
+                            # Find volatility for the strike
                             if market_data['forward_spreads']:
                                 spread_val = market_data['forward_spreads'][0]
                                 logger.info(f"Forward spread value: {spread_val}")
+                                logger.info(f"Strike value: {strike}")
                                 
                                 # Default to first vol point
                                 closest_vol = vol_surface[spread_key][0]['volatility']
                                 closest_strike = vol_surface[spread_key][0]['strike']
                                 
-                                # Find the closest strike to the current spread
+                                # Find the closest strike to the actual strike price
+                                min_distance = float('inf')
                                 for vol_point in vol_surface[spread_key]:
-                                    if abs(vol_point['strike'] - spread_val) < abs(closest_strike - spread_val):
+                                    distance = abs(vol_point['strike'] - strike)
+                                    if distance < min_distance:
+                                        min_distance = distance
                                         closest_vol = vol_point['volatility']
                                         closest_strike = vol_point['strike']
                                 
-                                logger.info(f"Found closest volatility {closest_vol} at strike {closest_strike}")
-                                market_data['spread_volatilities'] = [closest_vol] * len(delivery_dates)
+                                logger.info(f"Found closest volatility {closest_vol} at strike {closest_strike} (target strike: {strike})")
+                                market_data['spread_volatilities'] = [round(closest_vol, 4)] * len(delivery_dates)
+                                
+                                # Store annualized normal volatility for displaying in UI
+                                market_data['annualized_normal'] = round(closest_vol, 4)
+                                
+                                # Calculate percentage volatility (normal vol / price)
+                                if spread_val != 0:
+                                    market_data['percentage_vol'] = round(closest_vol / abs(spread_val) * 100, 2)
+                                else:
+                                    market_data['percentage_vol'] = round(closest_vol * 100, 2)
                             else:
                                 # If no forward spreads, use the middle volatility
                                 middle_idx = len(vol_surface[spread_key]) // 2
                                 middle_vol = vol_surface[spread_key][middle_idx]['volatility']
                                 logger.info(f"Using middle volatility: {middle_vol}")
-                                market_data['spread_volatilities'] = [middle_vol] * len(delivery_dates)
+                                market_data['spread_volatilities'] = [round(middle_vol, 4)] * len(delivery_dates)
+                                market_data['annualized_normal'] = round(middle_vol, 4)
                         else:
                             logger.warning(f"Spread key {spread_key} not found in volatility surface")
                 except Exception as e:
@@ -248,25 +279,33 @@ class OptionProcessor:
             # Ensure we have default volatilities
             market_data['volatilities'] = {}
             market_data['spread_volatilities'] = [0.35] * len(delivery_dates)
+            market_data['annualized_normal'] = 0.35
+            market_data['percentage_vol'] = 35.0
             
             # Add placeholder volatility smiles
             for index in indices:
+                base_price = market_data['indices_data'][index].get('price', 10.0)
                 market_data['volatilities'][index] = [
-                    {"strike": 9.0, "volatility": 0.33},
-                    {"strike": 9.5, "volatility": 0.31},
-                    {"strike": 10.0, "volatility": 0.30},
-                    {"strike": 10.5, "volatility": 0.31},
-                    {"strike": 11.0, "volatility": 0.33}
+                    {"strike": base_price * 0.9, "volatility": 0.33, "relative_strike": -10.0},
+                    {"strike": base_price * 0.95, "volatility": 0.31, "relative_strike": -5.0},
+                    {"strike": base_price, "volatility": 0.30, "relative_strike": 0.0},
+                    {"strike": base_price * 1.05, "volatility": 0.31, "relative_strike": 5.0},
+                    {"strike": base_price * 1.1, "volatility": 0.33, "relative_strike": 10.0}
                 ]
             
             if primary_index and secondary_index:
                 spread_key = f"{primary_index}-{secondary_index}"
+                spread_val = 1.0
+                if market_data['forward_spreads']:
+                    spread_val = market_data['forward_spreads'][0]
+                    
+                # Use absolute values for spread
                 market_data['volatilities'][spread_key] = [
-                    {"strike": -1.0, "volatility": 0.38},
-                    {"strike": -0.5, "volatility": 0.36},
-                    {"strike": 0.0, "volatility": 0.35},
-                    {"strike": 0.5, "volatility": 0.36},
-                    {"strike": 1.0, "volatility": 0.38}
+                    {"strike": spread_val - 0.5, "volatility": 0.38, "relative_strike": -50.0},
+                    {"strike": spread_val - 0.25, "volatility": 0.36, "relative_strike": -25.0},
+                    {"strike": spread_val, "volatility": 0.35, "relative_strike": 0.0},
+                    {"strike": spread_val + 0.25, "volatility": 0.36, "relative_strike": 25.0},
+                    {"strike": spread_val + 0.5, "volatility": 0.38, "relative_strike": 50.0}
                 ]
         
         return market_data

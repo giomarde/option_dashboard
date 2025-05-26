@@ -8,6 +8,7 @@ import ModelParameters from './ModelParameters';
 export interface VolatilityPoint {
   strike: number;
   volatility: number;
+  relative_strike?: number;
 }
 
 export interface VolatilitySmilesData {
@@ -31,6 +32,8 @@ export interface MonteCarloResults {
 export interface PricingResults extends BasePricingResults {
   volatility_smiles?: VolatilitySmilesData;
   mc_results?: MonteCarloResults;
+  annualized_normal?: number;
+  percentage_vol?: number;
 }
 
 interface PricingResultsProps {
@@ -46,6 +49,19 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
   useEffect(() => {
     setEditableConfig(config);
   }, [config]);
+
+  // Set volatility in model params when results change
+  useEffect(() => {
+    if (results.annualized_normal !== undefined && editableConfig.model_params) {
+      setEditableConfig(prevConfig => ({
+        ...prevConfig,
+        model_params: {
+          ...prevConfig.model_params,
+          volatility: results.annualized_normal
+        }
+      }));
+    }
+  }, [results.annualized_normal]);
 
   const handleModelParamsChange = (field: string, value: any) => {
     if (field === 'model_params') {
@@ -80,8 +96,8 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
 
   // Volatility smile toggle state
   const [visibleSmiles, setVisibleSmiles] = useState({
-    primary: true,
-    secondary: true,
+    primary: false,
+    secondary: false,
     spread: true,
   });
 
@@ -99,19 +115,25 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
   // Create mock data if real data isn't available
   const mockVolatilityData = {
     primary: [
-      { strike: 9.5, volatility: 0.34 }, { strike: 9.75, volatility: 0.32 },
-      { strike: 10.0, volatility: 0.30 }, { strike: 10.25, volatility: 0.32 },
-      { strike: 10.5, volatility: 0.35 }
+      { strike: 9.5, volatility: 0.34, relative_strike: -5.0 },
+      { strike: 9.75, volatility: 0.32, relative_strike: -2.5 },
+      { strike: 10.0, volatility: 0.30, relative_strike: 0.0 },
+      { strike: 10.25, volatility: 0.32, relative_strike: 2.5 },
+      { strike: 10.5, volatility: 0.35, relative_strike: 5.0 }
     ],
     secondary: [
-      { strike: 8.5, volatility: 0.37 }, { strike: 8.75, volatility: 0.34 },
-      { strike: 9.0, volatility: 0.33 }, { strike: 9.25, volatility: 0.35 },
-      { strike: 9.5, volatility: 0.38 }
+      { strike: 8.5, volatility: 0.37, relative_strike: -5.6 },
+      { strike: 8.75, volatility: 0.34, relative_strike: -2.8 },
+      { strike: 9.0, volatility: 0.33, relative_strike: 0.0 },
+      { strike: 9.25, volatility: 0.35, relative_strike: 2.8 },
+      { strike: 9.5, volatility: 0.38, relative_strike: 5.6 }
     ],
     spread: [
-      { strike: 0.5, volatility: 0.48 }, { strike: 0.75, volatility: 0.46 },
-      { strike: 1.0, volatility: 0.45 }, { strike: 1.25, volatility: 0.47 },
-      { strike: 1.5, volatility: 0.50 }
+      { strike: 0.5, volatility: 0.48, relative_strike: -50.0 },
+      { strike: 0.75, volatility: 0.46, relative_strike: -25.0 },
+      { strike: 1.0, volatility: 0.45, relative_strike: 0.0 },
+      { strike: 1.25, volatility: 0.47, relative_strike: 25.0 },
+      { strike: 1.5, volatility: 0.50, relative_strike: 50.0 }
     ]
   };
 
@@ -124,27 +146,63 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
   const secondarySmileData = results.volatility_smiles?.[secondaryIndex] || mockVolatilityData.secondary;
   const spreadSmileData = results.volatility_smiles?.[spreadKey] || mockVolatilityData.spread;
 
-  // Calculate chart domains based on visible data
+  // Calculate appropriate domain for X axis based on visible data
   const calculateXDomain = () => {
-    const allStrikes = [
-      ...(visibleSmiles.primary ? primarySmileData.map(p => p.strike) : []),
-      ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.strike) : []),
-      ...(visibleSmiles.spread ? spreadSmileData.map(p => p.strike) : [])
-    ];
-    
-    if (allStrikes.length === 0) return ['auto', 'auto'] as [number, number] | ['auto', 'auto'];
-    return [Math.min(...allStrikes) * 0.95, Math.max(...allStrikes) * 1.05] as [number, number];
+    // If showing absolute strikes
+    if (!showVolInPercent) {
+      // When only spread is visible, use spread data
+      if (visibleSmiles.spread && !visibleSmiles.primary && !visibleSmiles.secondary) {
+        const spreadStrikes = spreadSmileData.map(p => p.strike);
+        if (spreadStrikes.length === 0) return ['auto', 'auto'];
+        return [Math.min(...spreadStrikes) * 0.95, Math.max(...spreadStrikes) * 1.05];
+      }
+      
+      // When primary and/or secondary are visible
+      const allStrikes = [
+        ...(visibleSmiles.primary ? primarySmileData.map(p => p.strike) : []),
+        ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.strike) : [])
+      ];
+      
+      if (allStrikes.length === 0) return ['auto', 'auto'];
+      return [Math.min(...allStrikes) * 0.95, Math.max(...allStrikes) * 1.05];
+    } 
+    // If showing relative strikes (%)
+    else {
+      const allRelativeStrikes = [
+        ...(visibleSmiles.primary ? primarySmileData.map(p => p.relative_strike || 0) : []),
+        ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.relative_strike || 0) : []),
+        ...(visibleSmiles.spread ? spreadSmileData.map(p => p.relative_strike || 0) : [])
+      ];
+      
+      if (allRelativeStrikes.length === 0) return ['auto', 'auto'];
+      return [Math.min(...allRelativeStrikes) * 1.1, Math.max(...allRelativeStrikes) * 1.1];
+    }
   };
 
+  // Calculate appropriate domain for Y axis based on visible data
   const calculateYDomain = () => {
-    const allVols = [
-      ...(visibleSmiles.primary ? primarySmileData.map(p => p.volatility) : []),
-      ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.volatility) : []),
-      ...(visibleSmiles.spread ? spreadSmileData.map(p => p.volatility) : [])
-    ];
-    
-    if (allVols.length === 0) return ['auto', 'auto'] as [number, number] | ['auto', 'auto'];
-    return [Math.min(...allVols) * 0.9, Math.max(...allVols) * 1.1] as [number, number];
+    // Using percentage view for volatilities
+    if (showVolInPercent) {
+      const allVols = [
+        ...(visibleSmiles.primary ? primarySmileData.map(p => p.volatility * 100) : []),
+        ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.volatility * 100) : []),
+        ...(visibleSmiles.spread ? spreadSmileData.map(p => p.volatility * 100) : [])
+      ];
+      
+      if (allVols.length === 0) return ['auto', 'auto'];
+      return [Math.min(...allVols) * 0.9, Math.max(...allVols) * 1.1];
+    } 
+    // Using normal view for volatilities
+    else {
+      const allVols = [
+        ...(visibleSmiles.primary ? primarySmileData.map(p => p.volatility) : []),
+        ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.volatility) : []),
+        ...(visibleSmiles.spread ? spreadSmileData.map(p => p.volatility) : [])
+      ];
+      
+      if (allVols.length === 0) return ['auto', 'auto'];
+      return [Math.min(...allVols) * 0.9, Math.max(...allVols) * 1.1];
+    }
   };
 
   // Calculate optimal bar size based on number of data points
@@ -160,14 +218,14 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
       
       <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
         <div className="flex flex-col sm:flex-row justify-between sm:items-center mb-3">
-            <h3 className="text-lg font-semibold text-white mb-2 sm:mb-0">Model Configuration</h3>
-            <button
-                onClick={handleRepriceClick}
-                disabled={!onReprice}
-                className="w-full sm:w-auto px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-md disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors duration-150"
-            >
-                Reprice
-            </button>
+          <h3 className="text-lg font-semibold text-white mb-2 sm:mb-0">Model Configuration</h3>
+          <button
+            onClick={handleRepriceClick}
+            disabled={!onReprice}
+            className="w-full sm:w-auto px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-md disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors duration-150"
+          >
+            Reprice
+          </button>
         </div>
         <ModelParameters config={editableConfig} onConfigChange={handleModelParamsChange} />
       </div>
@@ -175,57 +233,57 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
       <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
         <h3 className="text-base font-semibold text-white mb-4">Pricing Results</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-            <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
-                <p className="text-xl font-bold text-blue-400">
-                    {results.total_value?.toFixed(6) ?? 'N/A'}
-                </p>
-                <p className="text-gray-400 text-xs mt-1">Option Value ({config.output_unit})</p>
-            </div>
-            <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
-                <p className="text-xl font-bold text-green-400">
-                    ${(results.total_value * config.cargo_volume * config.num_options)?.toLocaleString() ?? 'N/A'}
-                </p>
-                <p className="text-gray-400 text-xs mt-1">Total Contract Value</p>
-            </div>
-            <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
-                <p className="text-xl font-bold text-purple-400">
-                    {results.portfolio_greeks?.delta?.toFixed(4) ?? 'N/A'}
-                </p>
-                <p className="text-gray-400 text-xs mt-1">Portfolio Delta</p>
-            </div>
-            <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
-                <p className="text-xl font-bold text-yellow-400">
-                    {((results.volatilities?.[0] ?? 0) * 100).toFixed(2)}%
-                </p>
-                <p className="text-gray-400 text-xs mt-1">Implied Volatility</p>
-            </div>
+          <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
+            <p className="text-xl font-bold text-blue-400">
+              {results.total_value?.toFixed(4) ?? 'N/A'}
+            </p>
+            <p className="text-gray-400 text-xs mt-1">Option Value ({config.output_unit})</p>
+          </div>
+          <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
+            <p className="text-xl font-bold text-green-400">
+              ${(results.total_value * config.cargo_volume * config.num_options)?.toLocaleString() ?? 'N/A'}
+            </p>
+            <p className="text-gray-400 text-xs mt-1">Total Contract Value</p>
+          </div>
+          <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
+            <p className="text-xl font-bold text-purple-400">
+              {results.portfolio_greeks?.delta?.toFixed(4) ?? 'N/A'}
+            </p>
+            <p className="text-gray-400 text-xs mt-1">Portfolio Delta</p>
+          </div>
+          <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
+            <p className="text-xl font-bold text-yellow-400">
+              {results.percentage_vol?.toFixed(2)}%
+            </p>
+            <p className="text-gray-400 text-xs mt-1">Implied Volatility</p>
+          </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-                <h4 className="text-sm font-semibold text-white mb-2">Portfolio Greeks</h4>
-                <div className="space-y-1 text-xs">
-                    <div className="flex justify-between"><span className="text-gray-400">Delta:</span><span className="text-white">{results.portfolio_greeks?.delta?.toFixed(6) ?? 'N/A'}</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">Gamma:</span><span className="text-white">{results.portfolio_greeks?.gamma?.toFixed(6) ?? 'N/A'}</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">Vega:</span><span className="text-white">{results.portfolio_greeks?.vega?.toFixed(6) ?? 'N/A'}</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">Theta:</span><span className="text-white">{results.portfolio_greeks?.theta?.toFixed(6) ?? 'N/A'}</span></div>
-                </div>
+          <div>
+            <h4 className="text-sm font-semibold text-white mb-2">Portfolio Greeks</h4>
+            <div className="space-y-1 text-xs">
+              <div className="flex justify-between"><span className="text-gray-400">Delta:</span><span className="text-white">{results.portfolio_greeks?.delta?.toFixed(4) ?? 'N/A'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">Gamma:</span><span className="text-white">{results.portfolio_greeks?.gamma?.toFixed(4) ?? 'N/A'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">Vega:</span><span className="text-white">{results.portfolio_greeks?.vega?.toFixed(4) ?? 'N/A'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">Theta:</span><span className="text-white">{results.portfolio_greeks?.theta?.toFixed(4) ?? 'N/A'}</span></div>
             </div>
-            {results.mc_results && (
-            <div>
-                <h4 className="text-sm font-semibold text-white mb-2">Monte Carlo Statistics</h4>
-                <div className="space-y-1 text-xs">
-                    <div className="flex justify-between"><span className="text-gray-400">Mean:</span><span className="text-white">{results.mc_results.summary_statistics?.mean?.toFixed(6) ?? 'N/A'}</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">Std Dev:</span><span className="text-white">{results.mc_results.summary_statistics?.std?.toFixed(6) ?? 'N/A'}</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">95% VaR:</span><span className="text-white">{results.mc_results.summary_statistics?.percentiles?.[5]?.toFixed(6) ?? 'N/A'}</span></div>
-                    <div className="flex justify-between">
-                        <span className="text-gray-400">Exercise Prob:</span>
-                        <span className="text-white">
-                            {(results.mc_results.exercise_statistics?.exercise_probabilities?.[0]?.primary * 100)?.toFixed(1) ?? 'N/A'}%
-                        </span>
-                    </div>
-                </div>
+          </div>
+          {results.mc_results && (
+          <div>
+            <h4 className="text-sm font-semibold text-white mb-2">Monte Carlo Statistics</h4>
+            <div className="space-y-1 text-xs">
+              <div className="flex justify-between"><span className="text-gray-400">Mean:</span><span className="text-white">{results.mc_results.summary_statistics?.mean?.toFixed(4) ?? 'N/A'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">Std Dev:</span><span className="text-white">{results.mc_results.summary_statistics?.std?.toFixed(4) ?? 'N/A'}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">95% VaR:</span><span className="text-white">{results.mc_results.summary_statistics?.percentiles?.[5]?.toFixed(4) ?? 'N/A'}</span></div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Exercise Prob:</span>
+                <span className="text-white">
+                  {(results.mc_results.exercise_statistics?.exercise_probabilities?.[0]?.primary * 100)?.toFixed(1) ?? 'N/A'}%
+                </span>
+              </div>
             </div>
-            )}
+          </div>
+          )}
         </div>
       </div>
 
@@ -233,8 +291,120 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
         <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
           <h3 className="text-base font-semibold text-white mb-1">Volatility Smiles</h3>
           
-          {/* Move the smile selection buttons to the top */}
-          <div className="flex justify-center flex-wrap gap-2 mb-3 text-xs">
+          {/* Display mode toggle at the top */}
+          <div className="flex justify-center items-center mb-2 mt-1">
+            <span className="text-xs text-gray-400 mr-2">Display as:</span>
+            <div className="flex items-center bg-gray-700 rounded-lg p-1">
+              <button
+                onClick={() => setShowVolInPercent(false)}
+                className={`px-3 py-1 text-xs rounded transition-colors duration-150 ${
+                  !showVolInPercent ? 'bg-gray-600 text-white' : 'text-gray-300 hover:text-white'
+                }`}
+              >
+                Normal
+              </button>
+              <button
+                onClick={() => setShowVolInPercent(true)}
+                className={`px-3 py-1 text-xs rounded transition-colors duration-150 ${
+                  showVolInPercent ? 'bg-gray-600 text-white' : 'text-gray-300 hover:text-white'
+                }`}
+              >
+                Percentage
+              </button>
+            </div>
+          </div>
+          
+          <div className="h-64 md:h-80 flex items-center justify-center">
+          <ResponsiveContainer width="100%" height="100%">
+              <LineChart margin={{ top: 15, right: 30, left: 0, bottom: 20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                <XAxis 
+                  dataKey={showVolInPercent ? "relative_strike" : "strike"} 
+                  stroke="#9CA3AF" 
+                  tick={{ fontSize: 10 }} 
+                  type="number" 
+                  domain={calculateXDomain()}
+                  label={{ 
+                    value: showVolInPercent ? "Relative Strike (%)" : "Absolute Strike", 
+                    position: "insideBottom", 
+                    dy:15, 
+                    fontSize: 10, 
+                    fill:"#9CA3AF" 
+                  }}
+                  tickFormatter={(tick: number) => showVolInPercent ? `${tick.toFixed(0)}%` : tick.toFixed(4)}
+                />
+                <YAxis 
+                  stroke="#9CA3AF" 
+                  tick={{ fontSize: 10 }} 
+                  domain={calculateYDomain()}
+                  tickFormatter={(tick: number) => showVolInPercent ? `${tick.toFixed(1)}%` : tick.toFixed(4)}
+                  label={{ 
+                    value: showVolInPercent ? "Volatility (%)" : "Annualized Normal Vol", 
+                    angle: -90, 
+                    position: 'insideLeft', 
+                    dx:10, 
+                    fontSize: 10, 
+                    fill:"#9CA3AF" 
+                  }}
+                />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: '6px', color: '#F9FAFB', fontSize: '12px' }}
+                  formatter={(value: number, name: string) => {
+                    if (name === "strike") return [value.toFixed(4), 'Strike'];
+                    if (name === "relative_strike") return [`${value.toFixed(1)}%`, 'Relative Strike'];
+                    return showVolInPercent ? 
+                      [`${(value * 100).toFixed(2)}%`, 'Vol'] : 
+                      [value.toFixed(4), 'Annualized Normal Vol'];
+                  }}
+                  labelFormatter={(label: any) => {
+                    if (typeof label === 'number') {
+                      return showVolInPercent ? 
+                        `Relative Strike: ${label.toFixed(1)}%` : 
+                        `Strike: ${label.toFixed(4)}`;
+                    }
+                    return `Strike: ${label}`;
+                  }}
+                />
+                
+                {visibleSmiles.primary && primarySmileData.length > 0 && (
+                  <Line 
+                    type="monotone" 
+                    dataKey="volatility" 
+                    data={primarySmileData} 
+                    stroke={smileColors.primary} 
+                    name={`${primaryIndex} Vol`} 
+                    dot={true} 
+                    strokeWidth={2}
+                  />
+                )}
+                {visibleSmiles.secondary && secondarySmileData.length > 0 && (
+                  <Line 
+                    type="monotone" 
+                    dataKey="volatility" 
+                    data={secondarySmileData} 
+                    stroke={smileColors.secondary} 
+                    name={`${secondaryIndex} Vol`} 
+                    dot={true} 
+                    strokeWidth={2}
+                  />
+                )}
+                {visibleSmiles.spread && spreadSmileData.length > 0 && (
+                  <Line 
+                    type="monotone" 
+                    dataKey="volatility" 
+                    data={spreadSmileData} 
+                    stroke={smileColors.spread} 
+                    name="Spread Vol" 
+                    dot={true} 
+                    strokeWidth={2}
+                  />
+                )}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          
+          {/* Move the smile selection buttons to the bottom */}
+          <div className="flex justify-center flex-wrap gap-2 mt-3 text-xs">
             <button 
               onClick={() => toggleSmileVisibility('primary')} 
               className={`px-3 py-1 rounded transition-colors duration-150 ${visibleSmiles.primary ? 'bg-blue-600 text-white' : 'bg-gray-600 hover:bg-gray-500 text-gray-200'}`}
@@ -254,99 +424,15 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
               Spread Vol
             </button>
           </div>
-          
-          {/* Display mode toggle */}
-          <div className="flex justify-center items-center mb-2 mt-1">
-            <span className="text-xs text-gray-400 mr-2">Display as:</span>
-            <div className="flex items-center bg-gray-700 rounded-lg p-1">
-              <button
-                onClick={() => setShowVolInPercent(false)}
-                className={`px-3 py-1 text-xs rounded transition-colors duration-150 ${
-                  !showVolInPercent ? 'bg-gray-600 text-white' : 'text-gray-300 hover:text-white'
-                }`}
-              >
-                Decimal
-              </button>
-              <button
-                onClick={() => setShowVolInPercent(true)}
-                className={`px-3 py-1 text-xs rounded transition-colors duration-150 ${
-                  showVolInPercent ? 'bg-gray-600 text-white' : 'text-gray-300 hover:text-white'
-                }`}
-              >
-                Percentage
-              </button>
-            </div>
-          </div>
-          
-          <div className="h-64 md:h-80 flex items-center justify-center">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart margin={{ top: 15, right: 30, left: 0, bottom: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                <XAxis 
-                    dataKey="strike" 
-                    stroke="#9CA3AF" 
-                    tick={{ fontSize: 10 }} 
-                    type="number" 
-                    domain={calculateXDomain()}
-                    label={{ value: "Strike", position: "insideBottom", dy:15, fontSize: 10, fill:"#9CA3AF" }}
-                />
-                <YAxis 
-                    stroke="#9CA3AF" 
-                    tick={{ fontSize: 10 }} 
-                    domain={calculateYDomain()}
-                    tickFormatter={(tick: number) => showVolInPercent ? `${(tick * 100).toFixed(0)}%` : tick.toFixed(3)}
-                    label={{ value: "Volatility", angle: -90, position: 'insideLeft', dx:10, fontSize: 10, fill:"#9CA3AF" }}
-                />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: '6px', color: '#F9FAFB', fontSize: '12px' }}
-                  formatter={(value: number, name: string) => showVolInPercent ? [`${(value * 100).toFixed(2)}%`, name] : [value.toFixed(4), name]}
-                />
-                
-                {visibleSmiles.primary && primarySmileData.length > 0 && (
-                  <Line 
-                    type="monotone" 
-                    dataKey="volatility" 
-                    data={primarySmileData} 
-                    stroke={smileColors.primary} 
-                    name={`${primaryIndex} Vol`} 
-                    dot={false} 
-                    strokeWidth={2}
-                  />
-                )}
-                {visibleSmiles.secondary && secondarySmileData.length > 0 && (
-                  <Line 
-                    type="monotone" 
-                    dataKey="volatility" 
-                    data={secondarySmileData} 
-                    stroke={smileColors.secondary} 
-                    name={`${secondaryIndex} Vol`} 
-                    dot={false} 
-                    strokeWidth={2}
-                  />
-                )}
-                {visibleSmiles.spread && spreadSmileData.length > 0 && (
-                  <Line 
-                    type="monotone" 
-                    dataKey="volatility" 
-                    data={spreadSmileData} 
-                    stroke={smileColors.spread} 
-                    name="Spread Vol" 
-                    dot={false} 
-                    strokeWidth={2}
-                  />
-                )}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
         </div>
 
         <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
           <h3 className="text-base font-semibold text-white mb-3">Option Value Breakdown</h3>
-          <div className="h-64 md:h-80 flex items-center justify-center">
+          <div className="h-64 md:h-80">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart 
                 data={optionValueChartData} 
-                margin={{ top: 15, right: 20, left: 0, bottom: 5 }}
+                margin={{ top: 15, right: 30, left: 0, bottom: 20 }}
                 barSize={getBarSize(optionValueChartData.length)}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -363,22 +449,23 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
                 />
                 <Tooltip 
                   contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: '6px', color: '#F9FAFB', fontSize: '12px' }}
-                  formatter={(value: number) => value.toFixed(6)}
+                  formatter={(value: number) => value.toFixed(4)}
                 />
-                <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
+                <Legend 
+                  verticalAlign="bottom"
+                  height={36}
+                />
                 <Bar 
                   dataKey="intrinsic" 
                   stackId="a" 
                   fill="#10B981" 
                   name="Intrinsic Value" 
-                  radius={optionValueChartData.length <= 1 ? [8, 8, 0, 0] : [0, 0, 0, 0]}
                 />
                 <Bar 
                   dataKey="time_value" 
                   stackId="a" 
                   fill="#3B82F6" 
                   name="Time Value"
-                  radius={optionValueChartData.length <= 1 ? [0, 0, 8, 8] : [0, 0, 0, 0]} 
                 />
               </BarChart>
             </ResponsiveContainer>
@@ -391,44 +478,44 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
           <h3 className="text-base font-semibold text-white mb-3">Hedging Recommendations</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="p-3 bg-gray-750 rounded-md border border-gray-600">
-                <h4 className="text-xs font-semibold text-white mb-2">Recommended Position</h4>
-                <div className="space-y-1 text-xs">
-                    <div className="flex justify-between">
-                        <span className="text-gray-400">{primaryIndex} Hedge:</span>
-                        <span className="text-red-400 font-medium">
-                            -{(results.portfolio_greeks?.delta * config.cargo_volume)?.toLocaleString() ?? 'N/A'} MMBtu
-                        </span>
-                    </div>
-                    <div className="flex justify-between">
-                        <span className="text-gray-400">{secondaryIndex} Hedge:</span>
-                        <span className="text-green-400 font-medium">
-                            +{(results.portfolio_greeks?.delta * config.cargo_volume)?.toLocaleString() ?? 'N/A'} MMBtu
-                        </span>
-                    </div>
+              <h4 className="text-xs font-semibold text-white mb-2">Recommended Position</h4>
+              <div className="space-y-1 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-gray-400">{primaryIndex} Hedge:</span>
+                  <span className="text-red-400 font-medium">
+                    -{(results.portfolio_greeks?.delta * config.cargo_volume)?.toLocaleString() ?? 'N/A'} MMBtu
+                  </span>
                 </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">{secondaryIndex} Hedge:</span>
+                  <span className="text-green-400 font-medium">
+                    +{(results.portfolio_greeks?.delta * config.cargo_volume)?.toLocaleString() ?? 'N/A'} MMBtu
+                  </span>
+                </div>
+              </div>
             </div>
             <div className="p-3 bg-gray-750 rounded-md border border-gray-600">
-                <h4 className="text-xs font-semibold text-white mb-2">Exercise Probability</h4>
-                <div className="space-y-1 text-xs">
-                    <div className="flex justify-between">
-                        <span className="text-gray-400">Switch to {primaryIndex}:</span>
-                        <span className="text-green-400 font-medium">
-                            {(results.mc_results.exercise_statistics?.exercise_probabilities?.[0]?.primary * 100)?.toFixed(1) ?? 'N/A'}%
-                        </span>
-                    </div>
-                    <div className="flex justify-between">
-                        <span className="text-gray-400">Stay with {secondaryIndex}:</span>
-                        <span className="text-blue-400 font-medium">
-                          {(results.mc_results.exercise_statistics?.exercise_probabilities?.[0]?.secondary * 100)?.toFixed(1) ?? 'N/A'}%
-                          </span>
-                      </div>
-                  </div>
+              <h4 className="text-xs font-semibold text-white mb-2">Exercise Probability</h4>
+              <div className="space-y-1 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Switch to {primaryIndex}:</span>
+                  <span className="text-green-400 font-medium">
+                    {(results.mc_results.exercise_statistics?.exercise_probabilities?.[0]?.primary * 100)?.toFixed(1) ?? 'N/A'}%
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Stay with {secondaryIndex}:</span>
+                  <span className="text-blue-400 font-medium">
+                    {(results.mc_results.exercise_statistics?.exercise_probabilities?.[0]?.secondary * 100)?.toFixed(1) ?? 'N/A'}%
+                  </span>
+                </div>
               </div>
             </div>
           </div>
-        )}
-      </div>
-    );
-  };
+        </div>
+      )}
+    </div>
+  );
+};
 
-  export default PricingResultsComponent;
+export default PricingResultsComponent;

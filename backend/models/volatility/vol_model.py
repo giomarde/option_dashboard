@@ -166,8 +166,9 @@ class VolatilityModel:
         }
     
     def generate_volatility_smile(self, base_vol: float, 
-                               base_price: float,
-                               strikes: Optional[List[float]] = None) -> List[Dict[str, float]]:
+                                base_price: float,
+                                strikes: Optional[List[float]] = None,
+                                option_strike: Optional[float] = None) -> List[Dict[str, float]]:
         """
         Generate a volatility smile around a base volatility.
         
@@ -175,6 +176,7 @@ class VolatilityModel:
             base_vol: Base ATM volatility
             base_price: Current price or spread value
             strikes: Optional list of strike prices
+            option_strike: The actual option strike price (if available)
             
         Returns:
             List of dictionaries with strike and volatility pairs
@@ -184,44 +186,86 @@ class VolatilityModel:
             logger.warning("Base price is zero, using default value of 1.0")
             base_price = 1.0
         
+        # Round for cleaner calculations
+        base_price = round(base_price, 4)
+        base_vol = round(base_vol, 4)
+        
+        # If we have an option strike, use that as the center for our smile
+        center_price = option_strike if option_strike is not None else base_price
+        
         if strikes is None:
-            # Generate strikes around the base price
-            range_pct = 0.2  # 20% range around base price
-            num_strikes = 5
-            strikes = [base_price * (1 + (i - (num_strikes - 1) / 2) * range_pct / (num_strikes - 1)) 
-                      for i in range(num_strikes)]
+            # Generate more strikes over a wider range
+            # Use 2x the difference between center and base price to ensure wide enough range
+            range_width = max(0.3 * abs(center_price), abs(center_price - base_price) * 2, 0.3)
+            
+            # Create 9 points for a smoother smile
+            num_strikes = 9
+            
+            # Generate strikes around the center price
+            strikes = [round(center_price + (i - (num_strikes - 1) / 2) * range_width / (num_strikes - 1), 4) 
+                    for i in range(num_strikes)]
+            
+            # Make sure we have a point at exactly the center price and the base price
+            if center_price not in strikes:
+                strikes.append(round(center_price, 4))
+            if base_price not in strikes and center_price != base_price:
+                strikes.append(round(base_price, 4))
+            
+            # Sort and remove duplicates
+            strikes = sorted(list(set(strikes)))
+                
+            # Log the strikes to verify ATM centering
+            logger.debug(f"Generated strikes around {center_price} (current spread: {base_price}): {strikes}")
         
         # Generate volatility smile
         smile = []
         for strike in strikes:
-            # Calculate moneyness
-            moneyness = strike / base_price - 1
+            # Calculate moneyness (how far from ATM)
+            moneyness = strike / center_price - 1 if center_price != 0 else 0
             
             # Apply smile effect - more pronounced for extreme strikes
-            smile_factor = 1 + 0.5 * moneyness**2
+            smile_factor = 1 + 0.7 * moneyness**2  # Increased for more pronounced smile
             
             # Skew effect - typically higher volatilities for lower strikes (put skew)
-            skew_factor = 1 - 0.1 * moneyness
+            skew_factor = 1 - 0.2 * moneyness  # Increased for more skew
             
             # Combine effects
             vol = base_vol * smile_factor * skew_factor
             
-            # Ensure vol is reasonable
-            vol = min(max(0.1, vol), 0.8)
+            # Ensure vol is reasonable and round to 4 decimal places
+            vol = round(min(max(0.1, vol), 0.8), 4)
             
             smile.append({
                 'strike': strike,
-                'volatility': vol
+                'volatility': vol,
+                'relative_strike': round(100 * (strike / center_price - 1), 2) if center_price != 0 else 0  # Add relative strike as percentage
             })
+        
+        # Sort by strike for proper display
+        smile.sort(key=lambda x: x['strike'])
+        
+        # Log the smile
+        logger.debug(f"Generated volatility smile for center price {center_price}: {smile}")
         
         return smile
     
     def get_volatility_surface(self, indices: List[str],
-                            evaluation_date: Union[str, datetime],
-                            delivery_date: Union[str, datetime],
-                            base_prices: Optional[Dict[str, float]] = None) -> Dict[str, List[Dict[str, float]]]:
+                                evaluation_date: Union[str, datetime],
+                                delivery_date: Union[str, datetime],
+                                base_prices: Optional[Dict[str, float]] = None,
+                                option_strikes: Optional[Dict[str, float]] = None) -> Dict[str, List[Dict[str, float]]]:
         """
         Generate complete volatility surface data for indices and spreads.
+        
+        Args:
+            indices: List of indices to generate volatility surface for
+            evaluation_date: The evaluation date
+            delivery_date: The delivery date
+            base_prices: Dictionary of base prices for each index/spread
+            option_strikes: Dictionary of option strikes for each index/spread
+        
+        Returns:
+            Dictionary of volatility smiles for each index/spread
         """
         try:
             # Calculate base volatilities
@@ -231,6 +275,10 @@ class VolatilityModel:
             if base_prices is None:
                 base_prices = {index: 10.0 for index in indices}
                 
+            # If option strikes not provided, initialize empty dict
+            if option_strikes is None:
+                option_strikes = {}
+                    
             # Add spread prices if not provided
             if len(indices) > 1:
                 for i, index1 in enumerate(indices):
@@ -238,7 +286,7 @@ class VolatilityModel:
                         if i < j:  # Avoid duplicate pairs and self-pairs
                             spread_name = f"{index1}-{index2}"
                             if spread_name not in base_prices and index1 in base_prices and index2 in base_prices:
-                                base_prices[spread_name] = base_prices[index1] - base_prices[index2]
+                                base_prices[spread_name] = round(base_prices[index1] - base_prices[index2], 4)
             
             # Generate volatility smiles
             result = {}
@@ -248,18 +296,18 @@ class VolatilityModel:
                 if index in base_prices:
                     # Calculate appropriate strikes around the current price
                     current_price = base_prices[index]
-                    strikes = [current_price * (1 + (i - 2) * 0.05) for i in range(5)]  # -10% to +10%
-                    result[index] = self.generate_volatility_smile(vol, current_price, strikes)
+                    option_strike = option_strikes.get(index)
+                    result[index] = self.generate_volatility_smile(vol, current_price, option_strike=option_strike)
             
             # Spreads
             for spread_name, vol in vols['spreads'].items():
                 if spread_name in base_prices:
-                    # Calculate appropriate strikes around the current spread
+                    # Get the option strike for this spread if available
+                    option_strike = option_strikes.get(spread_name)
                     current_spread = base_prices[spread_name]
-                    # For spreads, use absolute offsets since spreads can be close to zero
-                    spread_range = max(0.5, abs(current_spread) * 0.5)  # 50% of spread or 0.5, whichever is larger
-                    strikes = [current_spread + (i - 2) * spread_range/2 for i in range(5)]
-                    result[spread_name] = self.generate_volatility_smile(vol, current_spread, strikes)
+                    
+                    # Generate volatility smile around both the current spread and the option strike
+                    result[spread_name] = self.generate_volatility_smile(vol, current_spread, option_strike=option_strike)
             
             return result
         except Exception as e:
@@ -268,18 +316,18 @@ class VolatilityModel:
             fallback = {}
             for index in indices:
                 fallback[index] = [
-                    {"strike": 10.0 * 0.9, "volatility": 0.33},
-                    {"strike": 10.0, "volatility": 0.30},
-                    {"strike": 10.0 * 1.1, "volatility": 0.33}
+                    {"strike": 10.0 * 0.9, "volatility": 0.33, "relative_strike": -10.0},
+                    {"strike": 10.0, "volatility": 0.30, "relative_strike": 0.0},
+                    {"strike": 10.0 * 1.1, "volatility": 0.33, "relative_strike": 10.0}
                 ]
             
             # Add a spread smile if needed
             if len(indices) > 1:
                 spread_name = f"{indices[0]}-{indices[1]}"
                 fallback[spread_name] = [
-                    {"strike": 1.0 * 0.5, "volatility": 0.36},
-                    {"strike": 1.0, "volatility": 0.35},
-                    {"strike": 1.0 * 1.5, "volatility": 0.36}
+                    {"strike": 1.0 * 0.5, "volatility": 0.36, "relative_strike": -50.0},
+                    {"strike": 1.0, "volatility": 0.35, "relative_strike": 0.0},
+                    {"strike": 1.0 * 1.5, "volatility": 0.36, "relative_strike": 50.0}
                 ]
             
             return fallback
