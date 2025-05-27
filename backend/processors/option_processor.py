@@ -1,5 +1,5 @@
 """
-Option Processor Framework
+Option Processor Framework - Fixed version
 
 A modular framework for processing option pricing requests with different pricing models.
 """
@@ -110,7 +110,7 @@ class OptionProcessor:
             evaluation_date = evaluation_date_str or datetime.now()
             
         # Calculate delivery dates
-        delivery_dates = self._calculate_delivery_dates(config)
+        delivery_dates = self.calculate_delivery_dates(config)
         
         # Calculate decision date (the option expiry)
         first_delivery_date = delivery_dates[0] if delivery_dates else evaluation_date
@@ -206,14 +206,30 @@ class OptionProcessor:
             vol_model = VolatilityModel(self.data_provider)
             
             # Prepare base prices and option strikes
-            base_prices = {idx: data.get('price', 10.0) for idx, data in market_data['indices_data'].items()}
-            logger.info(f"Base prices for volatility calculation: {base_prices}")
-            
-            # Add spread price
-            if primary_index and secondary_index and primary_index in base_prices and secondary_index in base_prices:
+            # IMPORTANT FIX: Use the actual forward prices for the delivery month, not spot prices
+            base_prices = {}
+            if market_data['forward_spreads'] and primary_index and secondary_index:
+                # Get month code for delivery date
+                months_ahead = (first_delivery_date.year - evaluation_date.year) * 12 + (first_delivery_date.month - evaluation_date.month)
+                month_code = f"M{months_ahead+1:02d}"  # +1 because M01 is first month
+                
+                # Get forward prices for that month code
+                base_prices[primary_index] = self._get_forward_price(market_data['forward_curves'][primary_index], month_code)
+                base_prices[secondary_index] = self._get_forward_price(market_data['forward_curves'][secondary_index], month_code)
+                
+                # Calculate spread price
                 spread_key = f"{primary_index}-{secondary_index}"
                 base_prices[spread_key] = round(base_prices[primary_index] - base_prices[secondary_index], 4)
-                logger.info(f"Added spread price {spread_key}: {base_prices[spread_key]}")
+            else:
+                # Fallback to spot prices if forward curve is not available
+                base_prices = {idx: data.get('price', 10.0) for idx, data in market_data['indices_data'].items()}
+                
+                # Add spread price
+                if primary_index and secondary_index and primary_index in base_prices and secondary_index in base_prices:
+                    spread_key = f"{primary_index}-{secondary_index}"
+                    base_prices[spread_key] = round(base_prices[primary_index] - base_prices[secondary_index], 4)
+            
+            logger.info(f"Base prices for volatility calculation: {base_prices}")
             
             # Prepare option strikes dictionary
             option_strikes = {}
@@ -230,7 +246,8 @@ class OptionProcessor:
                 base_prices=base_prices,
                 option_strikes=option_strikes,
                 option_type=option_type,
-                time_to_maturity=time_to_maturity
+                time_to_maturity=time_to_maturity,
+                forward_curves=market_data['forward_curves']  # Pass forward curves for better vol calibration
             )
             
             # Store volatility surface
@@ -247,6 +264,7 @@ class OptionProcessor:
                     
                     # Find volatility for the strike
                     if market_data['forward_spreads']:
+                        # IMPORTANT FIX: Use the actual forward spread for the pricing month
                         spread_val = market_data['forward_spreads'][0]
                         logger.info(f"Forward spread value: {spread_val}")
                         logger.info(f"Strike value: {strike}")
@@ -389,7 +407,7 @@ class OptionProcessor:
         # Fallback to default
         return default_price
     
-    def _calculate_delivery_dates(self, config: Dict[str, any]) -> List[datetime]:
+    def calculate_delivery_dates(self, config: Dict[str, any]) -> List[datetime]:
         """
         Calculate delivery dates based on configuration.
         
@@ -435,7 +453,7 @@ class OptionProcessor:
                 delivery_dates.append(delivery_date)
             except ValueError:
                 # Handle invalid dates (e.g., Feb 30)
-                last_day = self._get_last_day_of_month(first_year, first_month_num)
+                last_day = self.get_last_day_of_month(first_year, first_month_num)
                 delivery_date = datetime(first_year, first_month_num, min(delivery_day, last_day))
                 delivery_dates.append(delivery_date)
             return delivery_dates
@@ -453,13 +471,13 @@ class OptionProcessor:
                 delivery_dates.append(delivery_date)
             except ValueError:
                 # Handle invalid dates (e.g., Feb 30)
-                last_day = self._get_last_day_of_month(target_year, month_number)
+                last_day = self.get_last_day_of_month(target_year, month_number)
                 delivery_date = datetime(target_year, month_number, min(delivery_day, last_day))
                 delivery_dates.append(delivery_date)
         
         return delivery_dates
     
-    def _get_last_day_of_month(self, year: int, month: int) -> int:
+    def get_last_day_of_month(self, year: int, month: int) -> int:
         """
         Get the last day of a month.
         
@@ -550,29 +568,8 @@ class OptionProcessor:
         if 'annualized_normal' in market_data:
             enhanced['annualized_normal'] = market_data['annualized_normal']
         
-        # Calculate percentage volatility - COMPLETELY HANDLED ON BACKEND
-        if 'forward_spreads' in market_data and market_data['forward_spreads'] and 'annualized_normal' in market_data:
-            spread_value = abs(market_data['forward_spreads'][0])
-            normal_vol = market_data['annualized_normal']
-            
-            if spread_value > 0.001:
-                # Calculate percentage vol as (normal_vol / abs(spread)) * 100
-                percentage_vol = (normal_vol / spread_value) * 100
-            else:
-                # Fallback for very small spreads
-                percentage_vol = normal_vol * 100
-            
-            # Round to 2 decimal places for display
-            enhanced['percentage_vol'] = round(percentage_vol, 2)
-            
-            # Add calculation details for debugging
-            enhanced['vol_calculation'] = {
-                'normal_vol': normal_vol,
-                'spread_value': spread_value,
-                'formula': f"{normal_vol} / {spread_value} * 100 = {percentage_vol}"
-            }
-        elif 'percentage_vol' in market_data:
-            # Use pre-calculated value if available
+        # Add percentage volatility from market data
+        if 'percentage_vol' in market_data:
             enhanced['percentage_vol'] = market_data['percentage_vol']
         
         return enhanced
