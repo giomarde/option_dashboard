@@ -12,9 +12,9 @@ const App: React.FC = () => {
       
       <main className="w-full">
         {currentPage === 'dashboard' && (
-          <div className="w-full px-8 py-6">
-            <h2 className="text-2xl font-bold text-white mb-2">Dashboard</h2>
-            <p className="text-gray-400">Coming soon...</p>
+          <div className="w-full px-6 py-4">
+            <h2 className="text-xl font-bold text-white mb-2">Dashboard</h2>
+            <p className="text-gray-400 text-sm">Coming soon...</p>
           </div>
         )}
         {currentPage === 'pricer' && <Pricer />}

@@ -326,174 +326,177 @@ class VolatilityModel:
         """
         Generate complete volatility surface data for indices and spreads using Heston model.
         
-        Args:
-            indices: List of indices to generate volatility surface for
-            evaluation_date: The evaluation date
-            delivery_date: The delivery date
-            base_prices: Dictionary of base prices for each index/spread
-            option_strikes: Dictionary of option strikes for each index/spread
-            option_type: "call" or "put"
-            time_to_maturity: Optional explicit time to maturity (in years)
-            forward_curves: Optional dictionary with forward curves
-        
-        Returns:
-            Dictionary of volatility smiles for each index/spread
+        Logical approach:
+        1. Get time series data for each index and calculate historical volatility
+        2. Pull forward values for the correct month
+        3. Generate range of prices around forward (±50%)
+        4. Calculate Heston volatility for each price point
+        5. Calculate deltas for each point
+        6. Structure all data properly for frontend visualization
         """
         try:
-            # Use provided time_to_maturity if available
+            # Parse dates and calculate time to maturity if not provided
             if time_to_maturity is None:
-                # Calculate time to maturity from evaluation date to delivery date
                 if isinstance(evaluation_date, str):
                     evaluation_date = datetime.strptime(evaluation_date, '%Y-%m-%d')
                 if isinstance(delivery_date, str):
                     delivery_date = datetime.strptime(delivery_date, '%Y-%m-%d')
                     
-                # Calculate time to maturity in years
                 days_to_delivery = max(1, (delivery_date - evaluation_date).days)
                 time_to_maturity = days_to_delivery / 365.0
             
-            # Ensure reasonable time to maturity (minimum 0.01 years ~ 3-4 days)
             time_to_maturity = max(0.01, time_to_maturity)
+            logger.info(f"Generating volatility surface with time_to_maturity: {time_to_maturity} years")
             
-            logger.info(f"Generating volatility surface for indices: {indices}")
-            logger.info(f"Using time to maturity: {time_to_maturity} years")
-            logger.info(f"First delivery date: {delivery_date}")
-            
-            # Calculate base volatilities and Heston parameters
-            vols_data = self.calculate_volatility(
-                indices, 
-                evaluation_date, 
-                delivery_date,
-                forward_curves=forward_curves
-            )
-            
-            base_vols = vols_data['individual']
-            spread_vols = vols_data['spreads']
-            heston_params = vols_data['heston_params']
-            spread_heston_params = vols_data['spread_heston_params']
-            time_to_maturity = vols_data['time_to_maturity']
-            
-            logger.info(f"Time to maturity: {time_to_maturity} years")
-            
-            # If base prices not provided, create dummy values
+            # Ensure we have base prices
             if base_prices is None:
                 base_prices = {index: 10.0 for index in indices}
+                logger.warning(f"No base prices provided, using defaults: {base_prices}")
+            else:
+                logger.info(f"Using provided base prices: {base_prices}")
             
-            logger.info(f"Base prices for volatility calculation: {base_prices}")
+            # Generate volatility smiles for each index and spread
+            result = {}
             
-            # If option strikes not provided, initialize empty dict
-            if option_strikes is None:
-                option_strikes = {}
+            # Process individual indices first
+            for index in indices:
+                # Step 1: Get historical data and calculate base volatility
+                historical_vol = self._get_historical_volatility(index, evaluation_date)
+                logger.info(f"Historical volatility for {index}: {historical_vol:.4f}")
+                
+                # Step 2: Get forward value for the index
+                forward_value = base_prices.get(index, 10.0)
+                logger.info(f"Forward value for {index}: {forward_value:.4f}")
+                
+                # Step 3: Generate price range around forward (±50%)
+                min_price = forward_value * 0.5
+                max_price = forward_value * 1.5
+                price_points = np.linspace(min_price, max_price, 100)
+                logger.info(f"Generated {len(price_points)} price points from {min_price:.4f} to {max_price:.4f}")
+                
+                # Step 4: Calculate Heston parameters based on historical vol
+                heston_params = self.calibrate_heston_parameters(index, historical_vol, time_to_maturity)
+                logger.info(f"Calibrated Heston parameters for {index}: {heston_params}")
+                
+                # Step 5: Generate volatility smile data points
+                smile_data = []
+                for price in price_points:
+                    # Calculate moneyness (K/F)
+                    moneyness = price / forward_value
+                    
+                    # Calculate Heston implied vol (as percentage)
+                    percentage_vol_decimal = self.heston_implied_vol(moneyness, time_to_maturity, heston_params, option_type)
+                    
+                    # Convert to normal vol
+                    normal_vol = percentage_vol_decimal * abs(forward_value)  # Use abs to handle negative forwards
+                    
+                    # Calculate delta at this point
+                    delta = self._calculate_bachelier_delta(forward_value, price, time_to_maturity, normal_vol, option_type)
+                    
+                    # Add data point to smile
+                    smile_data.append({
+                        'strike': float(price),
+                        'volatility': float(normal_vol),
+                        'percentage_vol': float((normal_vol / max(0.01, abs(price))) * 100),  # Calculate % relative to strike price
+                        'delta': float(delta),
+                        'relative_strike': float(((price / forward_value) - 1) * 100),  # Relative to forward in %
+                        'time_to_maturity': float(time_to_maturity)
+                    })
+                
+                # Sort by strike
+                smile_data.sort(key=lambda x: x['strike'])
+                logger.info(f"Generated {len(smile_data)} volatility points for {index}")
+                
+                # Store in result
+                result[index] = smile_data
             
-            # Add spread prices if not provided
+            # Process spreads
             if len(indices) > 1:
                 for i, index1 in enumerate(indices):
                     for j, index2 in enumerate(indices):
-                        if i < j:  # Avoid duplicate pairs and self-pairs
+                        if i < j:  # Avoid duplicate pairs
                             spread_name = f"{index1}-{index2}"
-                            if spread_name not in base_prices and index1 in base_prices and index2 in base_prices:
-                                base_prices[spread_name] = round(base_prices[index1] - base_prices[index2], 4)
+                            
+                            # Step 1: Get historical data for spread
+                            spread_vol = self._get_historical_spread_volatility(index1, index2, evaluation_date)
+                            logger.info(f"Historical volatility for {spread_name}: {spread_vol:.4f}")
+                            
+                            # Step 2: Get forward value for spread
+                            spread_forward = base_prices.get(spread_name, base_prices.get(index1, 10.0) - base_prices.get(index2, 9.0))
+                            logger.info(f"Forward spread value for {spread_name}: {spread_forward:.4f}")
+                            
+                            # Step 3: Generate spread range (centered at forward, but ensure we include 0)
+                            min_spread = min(spread_forward * 0.5, spread_forward - abs(spread_forward) * 0.5, 0)
+                            max_spread = max(spread_forward * 1.5, spread_forward + abs(spread_forward) * 0.5, 0)
+                            if min_spread == max_spread:
+                                min_spread = -1.0
+                                max_spread = 1.0
+                            spread_points = np.linspace(min_spread, max_spread, 100)
+                            logger.info(f"Generated {len(spread_points)} spread points from {min_spread:.4f} to {max_spread:.4f}")
+                            
+                            # Step 4: Calculate Heston parameters for spread
+                            heston_params1 = self.calibrate_heston_parameters(index1, self._get_historical_volatility(index1, evaluation_date), time_to_maturity)
+                            heston_params2 = self.calibrate_heston_parameters(index2, self._get_historical_volatility(index2, evaluation_date), time_to_maturity)
+                            correlation = self._calculate_correlation(index1, index2, evaluation_date)
+                            spread_heston_params = self.calibrate_spread_heston_parameters(
+                                index1, index2, spread_vol, correlation, 
+                                {index1: heston_params1, index2: heston_params2}, 
+                                time_to_maturity
+                            )
+                            logger.info(f"Calibrated Heston parameters for {spread_name}: {spread_heston_params}")
+                            
+                            # Step 5: Generate volatility smile for spread
+                            spread_smile = []
+                            for spread in spread_points:
+                                # For spread options, moneyness is relative to absolute spread value
+                                # to handle cases where spread can be negative
+                                moneyness = spread / max(0.01, abs(spread_forward))
+                                if spread_forward < 0:
+                                    moneyness = -moneyness  # Adjust sign for negative spreads
+                                
+                                # Calculate Heston implied vol
+                                percentage_vol = self.heston_implied_vol(moneyness, time_to_maturity, spread_heston_params, option_type)
+                                
+                                # Convert to normal vol
+                                normal_vol = percentage_vol * abs(spread_forward)
+                                
+                                # Calculate delta
+                                delta = self._calculate_bachelier_delta(spread_forward, spread, time_to_maturity, normal_vol, option_type)
+                                
+                                # Add data point
+                                spread_smile.append({
+                                    'strike': float(spread),
+                                    'volatility': float(normal_vol),
+                                    'percentage_vol': float(percentage_vol * 100),  # Convert to percentage
+                                    'delta': float(delta),
+                                    'relative_strike': float(((spread / max(0.01, abs(spread_forward))) - 1) * 100),  # Relative to forward in %
+                                    'time_to_maturity': float(time_to_maturity)
+                                })
+                            
+                            # Sort by strike
+                            spread_smile.sort(key=lambda x: x['strike'])
+                            logger.info(f"Generated {len(spread_smile)} volatility points for {spread_name}")
+                            
+                            # Store in result
+                            result[spread_name] = spread_smile
+                            
+                            # If we have an option strike, log the volatility at that point
+                            if option_strikes and spread_name in option_strikes:
+                                strike = option_strikes[spread_name]
+                                # Find closest strike
+                                closest_point = min(spread_smile, key=lambda x: abs(x['strike'] - strike))
+                                logger.info(f"For strike {strike:.4f}, closest volatility point: {closest_point}")
             
-            # Generate volatility smiles
-            result = {}
-            
-            # Individual indices
-            for index, vol in base_vols.items():
-                if index in base_prices:
-                    # Get Heston parameters for this index
-                    params = heston_params.get(index, self.default_heston_params['default'])
-                    
-                    # Calculate smile around the current price
-                    forward = base_prices[index]
-                    option_strike = option_strikes.get(index)
-                    
-                    result[index] = self.generate_heston_smile(
-                        forward, vol, time_to_maturity, option_type, params, option_strike
-                    )
-            
-            # Spreads
-            for spread_name, vol in spread_vols.items():
-                if spread_name in base_prices:
-                    # Get Heston parameters for this spread
-                    params = spread_heston_params.get(spread_name, self.default_heston_params['default'])
-                    
-                    # Calculate smile around the current price
-                    forward = base_prices[spread_name]
-                    option_strike = option_strikes.get(spread_name)
-                    
-                    # For spreads, always ensure we have a range of -100% to +100% of forward value
-                    result[spread_name] = self.generate_heston_smile(
-                        forward, vol, time_to_maturity, option_type, params, option_strike,
-                        is_spread=True  # Mark this as a spread to handle range differently
-                    )
-            
-            logger.info(f"Volatility surface keys: {list(result.keys())}")
-            
-            # Log sample data from spread smile for debugging
-            spread_key = f"{indices[0]}-{indices[1]}" if len(indices) > 1 else None
-            if spread_key and spread_key in result:
-                spread_data = result[spread_key]
-                if spread_data:
-                    logger.info(f"Spread volatility data: {spread_data[:2]}...")
-                    
-                    # Find volatility at the strike
-                    if spread_key in option_strikes:
-                        strike = option_strikes[spread_key]
-                        forward = base_prices[spread_key]
-                        logger.info(f"Forward spread value: {forward}")
-                        logger.info(f"Strike value: {strike}")
-                        
-                        # Find the vol point closest to the strike
-                        closest_point = min(spread_data, key=lambda p: abs(p['strike'] - strike))
-                        logger.info(f"Found volatility {closest_point['volatility']} at strike {closest_point['strike']} (delta: {closest_point['delta']})")
-                        
-                        # Calculate percentage vol for this point
-                        percentage_vol = (closest_point['volatility'] / max(0.01, abs(forward))) * 100
-                        logger.info(f"Percentage vol = {closest_point['volatility']} / {max(0.01, abs(forward))} * 100 = {percentage_vol}%")
-                    
+            logger.info(f"Volatility surface generation complete with {len(result)} keys: {list(result.keys())}")
             return result
-            
+        
         except Exception as e:
-            logger.error(f"Error in get_volatility_surface: {e}")
+            logger.error(f"Error generating volatility surface: {e}")
             import traceback
             logger.error(traceback.format_exc())
             
-            # Create a minimal set of fallback volatility smiles
-            fallback = {}
-            for index in indices:
-                forward = base_prices.get(index, 10.0)
-                normal_vol = 0.3  # Default fallback vol
-                
-                fallback[index] = [
-                    self._create_vol_point(forward * 0.5, normal_vol * 1.1, forward, 0.25, option_type, time_to_maturity),
-                    self._create_vol_point(forward * 0.75, normal_vol * 1.05, forward, 0.4, option_type, time_to_maturity),
-                    self._create_vol_point(forward, normal_vol, forward, 0.5, option_type, time_to_maturity),
-                    self._create_vol_point(forward * 1.25, normal_vol * 1.05, forward, 0.6, option_type, time_to_maturity),
-                    self._create_vol_point(forward * 1.5, normal_vol * 1.1, forward, 0.75, option_type, time_to_maturity)
-                ]
-            
-            # Add a spread smile if needed
-            if len(indices) > 1:
-                spread_name = f"{indices[0]}-{indices[1]}"
-                spread_forward = base_prices.get(spread_name, 1.0)
-                normal_vol = 0.25  # Default spread vol
-                
-                # For spread, make range from -100% to +100% of forward value
-                min_strike = 0
-                max_strike = spread_forward * 2
-                if spread_forward < 0:
-                    min_strike = spread_forward * 2
-                    max_strike = 0
-                
-                fallback[spread_name] = [
-                    self._create_vol_point(min_strike, normal_vol * 1.1, spread_forward, 0.25, option_type, time_to_maturity),
-                    self._create_vol_point((min_strike + spread_forward) / 2, normal_vol * 1.05, spread_forward, 0.4, option_type, time_to_maturity),
-                    self._create_vol_point(spread_forward, normal_vol, spread_forward, 0.5, option_type, time_to_maturity),
-                    self._create_vol_point((spread_forward + max_strike) / 2, normal_vol * 1.05, spread_forward, 0.6, option_type, time_to_maturity),
-                    self._create_vol_point(max_strike, normal_vol * 1.1, spread_forward, 0.75, option_type, time_to_maturity)
-                ]
-            
-            return fallback
+            # Return a minimal fallback surface
+            return self._generate_fallback_volatility_surface(indices, base_prices)
     
     def generate_heston_smile(self, forward, base_vol, time_to_maturity, option_type, heston_params, center_strike=None, is_spread=False):
         """
@@ -637,7 +640,6 @@ class VolatilityModel:
                     f"params={params}, result={implied_vol}")
         
         return implied_vol
-
     
     def _generate_strike_range(self, forward, center_strike, is_spread=False):
         """
@@ -697,8 +699,6 @@ class VolatilityModel:
         strikes = np.sort(np.unique(all_strikes))
         
         return strikes
-
-    # Add these methods to your VolatilityModel class in backend/models/volatility/vol_model.py
 
     def _calculate_bachelier_delta(self, forward, strike, time_to_maturity, vol, option_type):
         """
@@ -893,3 +893,165 @@ class VolatilityModel:
             'time_to_maturity': float(time_to_maturity),
             'is_key_delta': is_key_delta
         }
+    
+    def _get_historical_volatility(self, index: str, evaluation_date: datetime, days: int = 90) -> float:
+        """
+        Get historical volatility for an index from time series data
+        """
+        try:
+            if self.data_provider:
+                # Calculate start date
+                start_date = evaluation_date - timedelta(days=days)
+                start_date_str = start_date.strftime('%Y-%m-%d')
+                end_date_str = evaluation_date.strftime('%Y-%m-%d')
+                
+                # Fetch historical data
+                price_series = self.data_provider.fetch_data(index, start_date_str, end_date_str)
+                
+                # Calculate volatility
+                vol = self.estimate_volatility_from_historical_data(price_series)
+                return vol
+            else:
+                # If no data provider, use default volatility
+                return self.default_volatilities.get(index, 0.35)
+        except Exception as e:
+            logger.warning(f"Failed to get historical volatility for {index}: {e}")
+            return self.default_volatilities.get(index, 0.35)
+
+    def _get_historical_spread_volatility(self, index1: str, index2: str, evaluation_date: datetime, days: int = 90) -> float:
+        """
+        Get historical volatility for a spread between two indices
+        """
+        try:
+            if self.data_provider:
+                # Calculate start date
+                start_date = evaluation_date - timedelta(days=days)
+                start_date_str = start_date.strftime('%Y-%m-%d')
+                end_date_str = evaluation_date.strftime('%Y-%m-%d')
+                
+                # Fetch historical data for both indices
+                series1 = self.data_provider.fetch_data(index1, start_date_str, end_date_str)
+                series2 = self.data_provider.fetch_data(index2, start_date_str, end_date_str)
+                
+                # Align on matching dates
+                aligned_data = pd.DataFrame({
+                    'index1': series1,
+                    'index2': series2
+                }).dropna()
+                
+                if len(aligned_data) < 5:
+                    logger.warning(f"Insufficient aligned data for {index1}-{index2}, using fallback")
+                    return max(0.3, (self.default_volatilities.get(index1, 0.35) + self.default_volatilities.get(index2, 0.35)) / 2)
+                
+                # Calculate spread series
+                spread_series = aligned_data['index1'] - aligned_data['index2']
+                
+                # Calculate volatility
+                vol = self.estimate_volatility_from_historical_data(spread_series)
+                return vol
+            else:
+                # If no data provider, use default spread volatility
+                return max(0.3, (self.default_volatilities.get(index1, 0.35) + self.default_volatilities.get(index2, 0.35)) / 2)
+        except Exception as e:
+            logger.warning(f"Failed to get historical spread volatility for {index1}-{index2}: {e}")
+            return max(0.3, (self.default_volatilities.get(index1, 0.35) + self.default_volatilities.get(index2, 0.35)) / 2)
+
+    def _calculate_correlation(self, index1: str, index2: str, evaluation_date: datetime, days: int = 90) -> float:
+        """
+        Calculate correlation between two indices
+        """
+        try:
+            if self.data_provider:
+                # Calculate start date
+                start_date = evaluation_date - timedelta(days=days)
+                start_date_str = start_date.strftime('%Y-%m-%d')
+                end_date_str = evaluation_date.strftime('%Y-%m-%d')
+                
+                # Fetch historical data for both indices
+                series1 = self.data_provider.fetch_data(index1, start_date_str, end_date_str)
+                series2 = self.data_provider.fetch_data(index2, start_date_str, end_date_str)
+                
+                # Align on matching dates
+                aligned_data = pd.DataFrame({
+                    'index1': series1,
+                    'index2': series2
+                }).dropna()
+                
+                if len(aligned_data) < 5:
+                    logger.warning(f"Insufficient aligned data for correlation of {index1}-{index2}, using fallback")
+                    return 0.7  # Default high correlation for energy indices
+                
+                # Calculate correlation
+                return aligned_data['index1'].corr(aligned_data['index2'])
+            else:
+                return 0.7  # Default correlation
+        except Exception as e:
+            logger.warning(f"Failed to calculate correlation for {index1}-{index2}: {e}")
+            return 0.7  # Default correlation
+
+    def _generate_fallback_volatility_surface(self, indices: List[str], base_prices: Dict[str, float]) -> Dict[str, List[Dict[str, float]]]:
+        """
+        Generate a fallback volatility surface when the main method fails
+        """
+        result = {}
+        
+        # Generate simple volatility smiles for individual indices
+        for index in indices:
+            forward = base_prices.get(index, 10.0)
+            vol = self.default_volatilities.get(index, 0.35)
+            
+            smile = []
+            for i in range(7):
+                strike = forward * (0.7 + i * 0.1)  # 70% to 130% of forward
+                rel_strike = ((strike / forward) - 1) * 100
+                normal_vol = vol * (1 + 0.1 * (rel_strike / 30)**2)  # Simple quadratic adjustment
+                percentage_vol = (normal_vol / forward) * 100
+                delta = self._calculate_bachelier_delta(forward, strike, 0.25, normal_vol, "call")
+                
+                smile.append({
+                    'strike': float(strike),
+                    'volatility': float(normal_vol),
+                    'percentage_vol': float(percentage_vol),
+                    'delta': float(delta),
+                    'relative_strike': float(rel_strike),
+                    'time_to_maturity': 0.25
+                })
+            
+            result[index] = smile
+        
+        # Generate spread smiles if needed
+        if len(indices) > 1:
+            for i, index1 in enumerate(indices):
+                for j, index2 in enumerate(indices):
+                    if i < j:
+                        spread_name = f"{index1}-{index2}"
+                        spread_forward = base_prices.get(spread_name, base_prices.get(index1, 10.0) - base_prices.get(index2, 9.0))
+                        spread_vol = max(0.3, (self.default_volatilities.get(index1, 0.35) + self.default_volatilities.get(index2, 0.35)) / 2)
+                        
+                        smile = []
+                        min_spread = min(spread_forward * 0.5, 0)
+                        max_spread = max(spread_forward * 1.5, 0)
+                        if min_spread == max_spread:
+                            min_spread = -1.0
+                            max_spread = 1.0
+                        
+                        for i in range(7):
+                            strike = min_spread + (max_spread - min_spread) * i / 6
+                            rel_strike = ((strike / max(0.01, abs(spread_forward))) - 1) * 100
+                            normal_vol = spread_vol * (1 + 0.1 * (rel_strike / 30)**2)
+                            percentage_vol = (normal_vol / max(0.01, abs(spread_forward))) * 100
+                            delta = self._calculate_bachelier_delta(spread_forward, strike, 0.25, normal_vol, "call")
+                            
+                            smile.append({
+                                'strike': float(strike),
+                                'volatility': float(normal_vol),
+                                'percentage_vol': float(percentage_vol),
+                                'delta': float(delta),
+                                'relative_strike': float(rel_strike),
+                                'time_to_maturity': 0.25
+                            })
+                        
+                        result[spread_name] = smile
+        
+        logger.warning(f"Using fallback volatility surface with {len(result)} keys")
+        return result

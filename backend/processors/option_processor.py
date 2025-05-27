@@ -176,8 +176,8 @@ class OptionProcessor:
             # For each delivery date, calculate the spread
             for i, delivery_date in enumerate(delivery_dates):
                 # Calculate months ahead
-                months_ahead = (delivery_date.year - evaluation_date.year) * 12 + (delivery_date.month - evaluation_date.month)
-                month_code = f"M{months_ahead+1:02d}"  # +1 because M01 is first month
+                months_ahead = (delivery_date.year - pricing_date.year) * 12 + (delivery_date.month - pricing_date.month)
+                month_code = f"M{months_ahead:02d}"  # +1 because M01 is first month
                 
                 # Get forward prices with proper defaults
                 primary_price = self._get_forward_price(market_data['forward_curves'][primary_index], month_code)
@@ -210,8 +210,8 @@ class OptionProcessor:
             base_prices = {}
             if market_data['forward_spreads'] and primary_index and secondary_index:
                 # Get month code for delivery date
-                months_ahead = (first_delivery_date.year - evaluation_date.year) * 12 + (first_delivery_date.month - evaluation_date.month)
-                month_code = f"M{months_ahead+1:02d}"  # +1 because M01 is first month
+                months_ahead = (delivery_date.year - pricing_date.year) * 12 + (delivery_date.month - pricing_date.month)
+                month_code = f"M{months_ahead:02d}"  # +1 because M01 is first month
                 
                 # Get forward prices for that month code
                 base_prices[primary_index] = self._get_forward_price(market_data['forward_curves'][primary_index], month_code)
@@ -259,76 +259,43 @@ class OptionProcessor:
                 spread_key = f"{primary_index}-{secondary_index}"
                 
                 if spread_key in vol_surface and vol_surface[spread_key]:
-                    # Log sample of volatility smile
-                    logger.info(f"Spread volatility data sample: {vol_surface[spread_key][:2]}...")
+                    forward_spread = market_data['forward_spreads'][0]
+                    logger.info(f"Forward spread value: {forward_spread}")
+                    logger.info(f"Strike value: {strike}")
                     
-                    # Find volatility for the strike
-                    if market_data['forward_spreads']:
-                        # IMPORTANT FIX: Use the actual forward spread for the pricing month
-                        spread_val = market_data['forward_spreads'][0]
-                        logger.info(f"Forward spread value: {spread_val}")
-                        logger.info(f"Strike value: {strike}")
-                        
-                        # Find the volatility point closest to the strike
-                        strike_vol_point = None
-                        
-                        # Try to find exact match first
-                        for vol_point in vol_surface[spread_key]:
-                            if abs(vol_point['strike'] - strike) < 0.0001:  # Nearly exact match
-                                strike_vol_point = vol_point
-                                break
-                        
-                        # If no exact match, find closest point
-                        if not strike_vol_point:
-                            logger.info("No exact strike match found, finding closest point")
-                            strike_vol_point = min(vol_surface[spread_key], key=lambda p: abs(p['strike'] - strike))
-                        
-                        # Get volatility at the strike
-                        closest_vol = strike_vol_point['volatility']
-                        closest_strike = strike_vol_point['strike']
-                        closest_delta = strike_vol_point.get('delta', 0.5)  # Default to 0.5 if not available
-                        
-                        logger.info(f"Found volatility point: {strike_vol_point}")
-                        
-                        # Ensure volatility is reasonable
-                        closest_vol = max(0.01, min(closest_vol, 0.5))  # Cap at 0.5
-                        
-                        # Store volatility for all delivery dates
-                        market_data['spread_volatilities'] = [round(closest_vol, 4)] * len(delivery_dates)
-                        market_data['annualized_normal'] = round(closest_vol, 4)
-                        
-                        # Get percentage vol from the volatility point if available
-                        if 'percentage_vol' in strike_vol_point:
-                            market_data['percentage_vol'] = round(strike_vol_point['percentage_vol'], 2)
-                            logger.info(f"Using percentage vol from point: {market_data['percentage_vol']}%")
-                        else:
-                            # Calculate percentage vol
-                            percentage_vol = (closest_vol / max(0.01, abs(spread_val))) * 100
-                            market_data['percentage_vol'] = round(percentage_vol, 2)
-                            logger.info(f"Calculated percentage vol: {closest_vol} / {max(0.01, abs(spread_val))} * 100 = {percentage_vol}%")
+                    # Find ATM volatility (at forward value)
+                    atm_vol_point = None
+                    
+                    # First try to find exact match to forward value
+                    for vol_point in vol_surface[spread_key]:
+                        if abs(vol_point['strike'] - forward_spread) < 0.0001:  # Nearly exact match
+                            atm_vol_point = vol_point
+                            logger.info(f"Found exact match for forward value: {atm_vol_point}")
+                            break
+                    
+                    # If no exact match, find closest point to forward
+                    if not atm_vol_point:
+                        logger.info("No exact forward match found, finding closest point")
+                        atm_vol_point = min(vol_surface[spread_key], key=lambda p: abs(p['strike'] - forward_spread))
+                        logger.info(f"Found closest point to forward: {atm_vol_point}")
+                    
+                    # Also log the strike vol point for comparison
+                    strike_vol_point = min(vol_surface[spread_key], key=lambda p: abs(p['strike'] - strike))
+                    logger.info(f"Strike volatility point: {strike_vol_point}")
+                    
+                    # Use ATM vol for pricing
+                    atm_vol = atm_vol_point['volatility']
+                    market_data['spread_volatilities'] = [round(atm_vol, 4)] * len(delivery_dates)
+                    market_data['annualized_normal'] = round(atm_vol, 4)
+                    
+                    # Get percentage vol
+                    if 'percentage_vol' in atm_vol_point:
+                        market_data['percentage_vol'] = round(atm_vol_point['percentage_vol'], 2)
                     else:
-                        # No forward spreads available, use default ATM volatility
-                        logger.warning("No forward spreads available, using ATM volatility")
-                        atm_points = [p for p in vol_surface[spread_key] if abs(p.get('delta', 0) - 0.5) < 0.1]
-                        
-                        if atm_points:
-                            atm_point = atm_points[0]
-                            atm_vol = atm_point['volatility']
-                            percentage_vol = atm_point.get('percentage_vol', atm_vol * 100)
-                        else:
-                            # Fallback to middle point
-                            middle_idx = len(vol_surface[spread_key]) // 2
-                            middle_point = vol_surface[spread_key][middle_idx]
-                            atm_vol = middle_point['volatility']
-                            percentage_vol = middle_point.get('percentage_vol', atm_vol * 100)
-                        
-                        # Ensure volatility is reasonable
-                        atm_vol = max(0.01, min(atm_vol, 0.5))
-                        
-                        market_data['spread_volatilities'] = [round(atm_vol, 4)] * len(delivery_dates)
-                        market_data['annualized_normal'] = round(atm_vol, 4)
+                        percentage_vol = (atm_vol / max(0.01, abs(forward_spread))) * 100
                         market_data['percentage_vol'] = round(percentage_vol, 2)
-                        logger.info(f"Using ATM volatility: {atm_vol} ({percentage_vol}%)")
+                    
+                    logger.info(f"Using ATM volatility: {atm_vol:.4f} ({market_data['percentage_vol']}%)")
                 else:
                     # Spread key not found in volatility surface
                     logger.warning(f"Spread key {spread_key} not found in volatility surface, using default volatility")
