@@ -210,35 +210,59 @@ class VolatilityModel:
     
     def calibrate_heston_parameters(self, index, base_vol, time_to_maturity):
         """
-        Calibrate Heston model parameters based on the index and base volatility.
+        Calibrate Heston model parameters for stronger volatility smile.
         """
         print(f"DEBUG - calibrate_heston_parameters for {index}: base_vol={base_vol}, time={time_to_maturity}")
         
-        # Get default parameters for this index or use general defaults
-        default_params = self.default_heston_params.get(index, self.default_heston_params['default'])
-        print(f"DEBUG - Default params for {index}: {default_params}")
+        # Convert from percentage (31%) to decimal (0.31) for Heston calculations
+        decimal_vol = base_vol / 100.0
+        print(f"DEBUG - Converting from percentage vol {base_vol}% to decimal {decimal_vol}")
         
-        # Convert normal vol to percentage vol for Heston model
-        # This is critical - check if we're using the correct value for conversion
-        avg_price = 10.0  # This is a placeholder, ideally we'd use actual average price
-        percentage_vol = base_vol / avg_price
-        print(f"DEBUG - Converting normal vol {base_vol} to percentage vol: {percentage_vol} (using avg_price={avg_price})")
+        # Initial variance (v0) is square of volatility decimal
+        v0 = decimal_vol**2
+        print(f"DEBUG - v0 (initial variance): {v0}")
         
-        # Initial variance (v0) is square of percentage volatility
-        v0 = percentage_vol**2
+        # CRITICAL SMILE ENHANCEMENT
         
-        # Set long-run variance (theta) to match initial variance
+        # 1. Kappa (mean reversion speed)
+        # - Force kappa to be small enough to create stronger smile
+        # - Recommended range for visible smile: 0.1-0.8
+        # - Ignore time_to_maturity formula that creates too high values
+        kappa = 0.5  # Fixed value that works well for commodity smiles
+        print(f"DEBUG - Fixed kappa (mean reversion): {kappa}")
+        
+        # 2. Theta (long-run variance)
+        # - Keep theta = v0 for short maturities
         theta = v0
+        print(f"DEBUG - theta (long-run variance): {theta}")
         
-        # Adjust vol-of-vol (sigma) based on historical vol level
-        sigma = default_params['sigma'] * np.sqrt(v0 / max(0.01, default_params['v0']))
+        # 3. Sigma (volatility of volatility)
+        # - Critical for smile curvature
+        # - Need sigma large enough relative to kappa
+        # - sigma/kappa ratio determines curvature magnitude
+        # - Target ratio of 1.0-2.0 for pronounced smile
         
-        # Set negative correlation parameter (rho) for downside skew
-        rho = default_params['rho']
+        # Calculate sigma to achieve desired sigma/kappa ratio
+        sigma_kappa_ratio = 1.5  # Target ratio for strong curvature
+        sigma = kappa * sigma_kappa_ratio  # Ensure sigma is proportionally large enough
+        print(f"DEBUG - sigma (vol-of-vol) set for ratio {sigma_kappa_ratio}: {sigma}")
         
-        # Adjust mean reversion speed (kappa) based on time to maturity
-        kappa = default_params['kappa']
+        # 4. Rho (correlation)
+        # - Controls smile asymmetry (skew)
+        # - More negative = steeper downward slope on right side
+        # - For commodity markets: usually -0.3 to -0.8
         
+        # Different rho for different product types
+        if "spread" in index.lower() or "-" in index:
+            # Spread options typically have more pronounced skew
+            rho = -0.7
+        else:
+            # Outright options
+            rho = -0.6
+        
+        print(f"DEBUG - Fixed rho (correlation): {rho}")
+        
+        # Build parameters dict
         result = {
             'v0': v0,
             'kappa': kappa,
@@ -247,7 +271,7 @@ class VolatilityModel:
             'rho': rho
         }
         
-        print(f"DEBUG - Calibrated Heston params for {index}: {result}")
+        print(f"DEBUG - Final calibrated Heston params for {index}: {result}")
         
         return result
     
@@ -260,15 +284,7 @@ class VolatilityModel:
                             time_to_maturity: Optional[float] = None,
                             forward_curves: Optional[Dict] = None) -> Dict[str, List[Dict[str, float]]]:
         """
-        Generate complete volatility surface data for indices and spreads using Heston model.
-        
-        Improved approach:
-        1. Get real historical data for each index and calculate historical volatility
-        2. Use forward values from market data
-        3. Generate dense grid of prices around forward (±50%) with more points near ATM
-        4. Calculate Heston volatility for each price point based on calibrated parameters
-        5. Calculate deltas for each point
-        6. Structure all data properly for frontend visualization
+        Generate complete volatility surface data with proper debugging.
         """
         try:
             # Parse dates and calculate time to maturity if not provided
@@ -305,18 +321,16 @@ class VolatilityModel:
                 logger.info(f"Forward value for {index}: {forward_value:.4f}")
                 
                 # Step 3: Generate price range around forward (±50%)
-                # Create more points (100 instead of 15) with concentration near ATM
                 min_price = forward_value * 0.5
                 max_price = forward_value * 1.5
                 
                 # Generate points with higher density near ATM
-                # Use 100 points total
                 price_points = self._generate_price_points(forward_value, min_price, max_price, 100)
                 
                 # Step 4: Calculate Heston parameters based on historical vol
                 heston_params = self.calibrate_heston_parameters(index, historical_vol, time_to_maturity)
                 
-                # Step 5: Generate volatility smile data points
+                # Step 5: Generate volatility smile data points with detailed logging
                 smile_data = []
                 for price in price_points:
                     # Calculate moneyness (K/F)
@@ -326,10 +340,15 @@ class VolatilityModel:
                     percentage_vol_decimal = self.heston_implied_vol(moneyness, time_to_maturity, heston_params, option_type)
                     
                     # Convert to normal vol
-                    normal_vol = percentage_vol_decimal * abs(forward_value)
+                    normal_vol = percentage_vol_decimal * forward_value
                     
                     # Calculate delta at this point
                     delta = self._calculate_bachelier_delta(forward_value, price, time_to_maturity, normal_vol, option_type)
+                    
+                    # Log detailed information for key price points
+                    if abs(price - forward_value) < 0.01 or price == min_price or price == max_price:
+                        logger.info(f"Key price point for {index}: price={price:.4f}, moneyness={moneyness:.4f}, "
+                                    f"percentage_vol={percentage_vol_decimal:.4f}, normal_vol={normal_vol:.4f}")
                     
                     # Add data point to smile
                     smile_data.append({
@@ -345,60 +364,99 @@ class VolatilityModel:
                 smile_data.sort(key=lambda x: x['strike'])
                 logger.info(f"Generated {len(smile_data)} volatility points for {index}")
                 
+                # Log a summary of the volatility range
+                if smile_data:
+                    min_vol = min(p['volatility'] for p in smile_data)
+                    max_vol = max(p['volatility'] for p in smile_data)
+                    atm_vol = next((p['volatility'] for p in smile_data if abs(p['strike'] - forward_value) < 0.01), None)
+                    logger.info(f"Volatility range for {index}: min={min_vol:.4f}, max={max_vol:.4f}, atm={atm_vol:.4f}")
+                
                 # Store in result
                 result[index] = smile_data
             
-            # Process spreads
+            # Process spreads with additional debugging and improvements
             if len(indices) > 1:
                 for i, index1 in enumerate(indices):
                     for j, index2 in enumerate(indices):
                         if i < j:  # Avoid duplicate pairs
                             spread_name = f"{index1}-{index2}"
                             
-                            # Step 1: Get historical data for spread
+                            # Get historical data for spread
                             spread_vol = self._get_historical_spread_volatility(index1, index2, evaluation_date)
                             logger.info(f"Historical volatility for {spread_name}: {spread_vol:.4f}")
                             
-                            # Step 2: Get forward value for spread
+                            # Get forward value for spread
                             spread_forward = base_prices.get(spread_name, 
                                                             base_prices.get(index1, 10.0) - 
                                                             base_prices.get(index2, 9.0))
                             logger.info(f"Forward spread value for {spread_name}: {spread_forward:.4f}")
                             
-                            # Step 3: Treat spread exactly like an individual time series
-                            # Use the same calibration method as for individual indices
-                            heston_params = self.calibrate_heston_parameters(spread_name, spread_vol, time_to_maturity)
+                            # CRITICAL FIX: Special handling for near-zero spreads
+                            # For spread options, we work in normal volatility space rather than percentage
+                            # This avoids the division by near-zero spreads
                             
-                            # Generate spread range with appropriate points
-                            min_spread = min(0, spread_forward - abs(spread_forward))
-                            max_spread = max(0, spread_forward + abs(spread_forward))
+                            # Step 1: Calibrate parameters using normal volatility directly
+                            # For spread options, we use the absolute volatility in parameter calibration
+                            absolute_vol = spread_vol  # Keep as percentage for parameter calibration
+                            heston_params = self.calibrate_spread_parameters(spread_name, absolute_vol, time_to_maturity)
                             
-                            # Ensure reasonable min/max bounds
-                            if min_spread == max_spread:
-                                min_spread = -1.0
-                                max_spread = 1.0
-                                
+                            # Step 2: Generate spread range with appropriate points
+                            # Ensure adequate coverage around ATM and zero
+                            min_spread = min(-0.5, spread_forward - max(0.5, abs(spread_forward)))
+                            max_spread = max(0.5, spread_forward + max(0.5, abs(spread_forward)))
+                            
                             # Generate points with higher density near ATM and near 0
                             spread_points = self._generate_spread_points(spread_forward, min_spread, max_spread, 100)
                             
-                            # Generate smile data points for spread
+                            # Step 3: Generate smile data points for spread
                             spread_smile = []
                             for spread in spread_points:
-                                # For spread options, moneyness is relative to spread forward
-                                if abs(spread_forward) < 0.001:
-                                    # Special case for zero or near-zero forward
-                                    moneyness = 1.0
+                                # CRITICAL FIX: Handle moneyness calculation for near-zero spreads
+                                # Traditional moneyness (K/F) breaks down when F approaches zero
+                                
+                                if abs(spread_forward) < 0.01:
+                                    # For near-zero forward spreads, use absolute distance
+                                    # normalized by a reference value (0.1 is a reasonable scale)
+                                    moneyness = 1.0 + (spread - spread_forward) / 0.1
                                 else:
+                                    # For non-zero spreads, use standard moneyness
                                     moneyness = spread / spread_forward
                                 
-                                # Calculate Heston implied vol using the same method as individual indices
-                                percentage_vol = self.heston_implied_vol(moneyness, time_to_maturity, heston_params, option_type)
+                                # Log specific issues with moneyness calculation
+                                if not np.isfinite(moneyness) or moneyness <= 0:
+                                    logger.warning(f"Invalid moneyness calculated: {moneyness} (spread={spread}, forward={spread_forward})")
+                                    moneyness = 1.0  # Use safe default
                                 
-                                # Convert to normal vol
-                                normal_vol = percentage_vol * abs(spread_forward)
+                                # CRITICAL FIX: Use modified approach for volatility calculation
+                                if abs(spread_forward) < 0.01:
+                                    # For near-zero spreads, work directly with normal volatility
+                                    # Use a base normal vol and adjust based on distance from ATM
+                                    base_normal_vol = spread_vol / 100.0  # Convert from percentage to decimal
+                                    
+                                    # Calculate normal vol directly with adjustment for distance from ATM
+                                    # Higher vol for strikes further from ATM (quadratic shape)
+                                    distance_from_atm = abs(spread - spread_forward)
+                                    atm_adj_factor = 1.0 + (distance_from_atm * distance_from_atm * 2.0)
+                                    normal_vol = base_normal_vol * atm_adj_factor
+                                    
+                                    # Calculate implied percentage vol (for display purposes only)
+                                    # Use a reference value to avoid division by zero or tiny numbers
+                                    reference_value = max(0.1, abs(spread_forward))
+                                    percentage_vol = normal_vol / reference_value
+                                else:
+                                    # For regular spreads, use the Heston model
+                                    percentage_vol = self.heston_implied_vol(moneyness, time_to_maturity, heston_params, option_type)
+                                    
+                                    # Convert to normal vol
+                                    normal_vol = percentage_vol * abs(spread_forward)
                                 
-                                # Calculate delta
+                                # Calculate delta (use standard Bachelier formula)
                                 delta = self._calculate_bachelier_delta(spread_forward, spread, time_to_maturity, normal_vol, option_type)
+                                
+                                # Log key points for debugging
+                                if abs(spread - spread_forward) < 0.01 or abs(spread) < 0.01 or spread == min_spread or spread == max_spread:
+                                    logger.info(f"Key spread point: spread={spread:.4f}, moneyness={moneyness:.4f}, " 
+                                            f"percentage_vol={percentage_vol*100:.4f}, normal_vol={normal_vol:.4f}")
                                 
                                 # Add data point to smile
                                 spread_smile.append({
@@ -406,7 +464,7 @@ class VolatilityModel:
                                     'volatility': float(normal_vol),
                                     'percentage_vol': float(percentage_vol * 100),  # Convert to percentage
                                     'delta': float(delta),
-                                    'relative_strike': float(((spread / max(0.01, abs(spread_forward))) - 1) * 100),
+                                    'relative_strike': float(((spread - spread_forward) / max(0.1, abs(spread_forward))) * 100),
                                     'time_to_maturity': float(time_to_maturity)
                                 })
                             
@@ -527,12 +585,8 @@ class VolatilityModel:
     def heston_implied_vol(self, moneyness, time_to_maturity, params, option_type="call"):
         """
         Calculate the implied volatility from the Heston model.
+        Enhanced implementation for stronger smile shape.
         """
-        # For key moneyness values, print detailed debug info
-        debug_this = abs(moneyness - 1.0) < 0.01 or abs(moneyness - 0.5) < 0.01 or abs(moneyness - 1.5) < 0.01
-        
-        if debug_this:
-            print(f"DEBUG - heston_implied_vol: moneyness={moneyness}, time={time_to_maturity}, params={params}")
         
         # Ensure moneyness is valid
         if moneyness <= 0 or not np.isfinite(moneyness):
@@ -549,23 +603,29 @@ class VolatilityModel:
         # Calculate log-moneyness
         log_moneyness = np.log(moneyness)
         
-        # Apply simplified Heston smile approximation
+        # IMPROVED VOLATILITY FORMULA
+        
+        # Base ATM volatility
         atm_vol = np.sqrt(v0)
-        skew_term = rho * sigma * np.sqrt(v0) / kappa
-        curvature_term = (1 - rho**2) * sigma**2 * v0 / (2 * kappa**2)
         
-        if debug_this:
-            print(f"DEBUG - Calculation terms: atm_vol={atm_vol}, skew_term={skew_term}, curvature_term={curvature_term}")
-            print(f"DEBUG - log_moneyness={log_moneyness}")
+        # Calculate skew term - controls linear slope of smile
+        # The formula is adjusted to create more pronounced effect
+        skew_term = rho * sigma / kappa
         
-        # Apply the approximation (quadratic in log-moneyness)
-        implied_vol = atm_vol * (1 + skew_term * log_moneyness + curvature_term * log_moneyness**2)
+        # Calculate curvature term - controls quadratic shape of smile
+        # Using a simplified formula that creates stronger curvature
+        curvature_term = (1 - rho**2) * sigma**2 / (2 * kappa**2)
+    
         
-        # Ensure reasonable bounds
-        implied_vol = max(0.01, min(implied_vol, 1.0))
+        # Apply the improved approximation formula
+        raw_implied_vol = atm_vol * (1 + skew_term * log_moneyness + curvature_term * log_moneyness**2)
+
         
-        if debug_this:
-            print(f"DEBUG - Final implied vol: {implied_vol}")
+        # Apply reasonable bounds but allow wide enough range for smile
+        implied_vol = max(0.01, min(raw_implied_vol, 2.0))
+        
+        # Debug if bounds were applied
+
         
         return implied_vol
     
@@ -811,4 +871,50 @@ class VolatilityModel:
                         result[spread_name] = smile
         
         logger.warning(f"Using fallback volatility surface with {len(result)} keys")
+        return result
+
+    def calibrate_spread_parameters(self, index, base_vol, time_to_maturity):
+        """
+        Special calibration method for spread options that handles volatility properly.
+        """
+        print(f"DEBUG - calibrate_spread_parameters for {index}: base_vol={base_vol}, time={time_to_maturity}")
+        
+        # For spread options, base_vol is already in percentage terms
+        # Convert from percentage to decimal for parameter calculation
+        decimal_vol = base_vol / 100.0
+        print(f"DEBUG - Using percentage vol {base_vol}% as decimal {decimal_vol}")
+        
+        # Initial variance (v0) is square of volatility decimal
+        v0 = decimal_vol**2
+        print(f"DEBUG - v0 (initial variance): {v0}")
+        
+        # Use moderate kappa for spread options
+        kappa = 0.5
+        print(f"DEBUG - Spread kappa (mean reversion): {kappa}")
+        
+        # Long-run variance
+        theta = v0
+        print(f"DEBUG - theta (long-run variance): {theta}")
+        
+        # Volatility of volatility - important for smile shape
+        # Use proportional approach
+        sigma = 0.5  # Moderate value for stable results
+        print(f"DEBUG - sigma (vol-of-vol): {sigma}")
+        
+        # Correlation parameter - controls asymmetry
+        # Use moderate negative value for realistic downward skew
+        rho = -0.3
+        print(f"DEBUG - rho (correlation): {rho}")
+        
+        # Build parameters dict
+        result = {
+            'v0': v0,
+            'kappa': kappa,
+            'theta': theta,
+            'sigma': sigma,
+            'rho': rho
+        }
+        
+        print(f"DEBUG - Final calibrated spread params: {result}")
+        
         return result
