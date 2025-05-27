@@ -5,6 +5,7 @@ import logging
 from typing import Dict, List, Optional, Union, Tuple
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -166,20 +167,23 @@ class VolatilityModel:
         }
     
     def generate_volatility_smile(self, base_vol: float, 
-                                    base_price: float,
-                                    strikes: Optional[List[float]] = None,
-                                    option_strike: Optional[float] = None) -> List[Dict[str, float]]:
+                                  base_price: float,
+                                  option_type: str = "call",
+                                  strikes: Optional[List[float]] = None,
+                                  option_strike: Optional[float] = None) -> List[Dict[str, float]]:
         """
-        Generate a volatility smile around a base volatility with proper points.
+        Generate a volatility smile around a base volatility with proper points
+        including delta values for key points.
         
         Args:
             base_vol: Base ATM volatility
             base_price: Current price or spread value (forward)
+            option_type: "call" or "put"
             strikes: Optional list of strike prices
             option_strike: The actual option strike price (if available)
             
         Returns:
-            List of dictionaries with strike and volatility pairs
+            List of dictionaries with strike, volatility, delta pairs
         """
         # Safety check for base_price
         if base_price == 0:
@@ -194,10 +198,16 @@ class VolatilityModel:
         center_price = option_strike if option_strike is not None else base_price
         
         if strikes is None:
-            # For spread options, ensure we have at least 45 points focused around the strike and forward
-            # Determine the strike range based on the forward and strike price
-            range_min = min(center_price, base_price) - max(0.5, abs(center_price - base_price))
-            range_max = max(center_price, base_price) + max(0.5, abs(center_price - base_price))
+            # For spread options, determine wider range to ensure we capture 0.25-0.75 delta
+            # For indices, use a narrower range
+            if abs(base_price) < 2.0:  # Likely a spread
+                # Use a wider range for spreads to capture delta range
+                range_min = center_price - max(1.0, abs(center_price))
+                range_max = center_price + max(1.0, abs(center_price))
+            else:
+                # Use a narrower range for indices
+                range_min = center_price * 0.5
+                range_max = center_price * 1.5
             
             # Create at least 45 points with concentration around the key values
             num_points = 45
@@ -210,7 +220,7 @@ class VolatilityModel:
             if abs(center_price - base_price) > 0.0001:  # Only add if different from center price
                 strikes.append(round(base_price, 4))
             
-            # Distribute 43 remaining points (or 44 if strike=forward)
+            # Distribute remaining points (or 44 if strike=forward)
             remaining_points = num_points - len(strikes)
             
             # Add points between range_min and range_max
@@ -227,8 +237,12 @@ class VolatilityModel:
             logger.info(f"Generated {len(strikes)} volatility points from {strikes[0]} to {strikes[-1]}")
             logger.info(f"Strike price: {center_price}, Forward price: {base_price}")
         
-        # Generate volatility smile
+        # Generate volatility smile with delta values
         smile = []
+        
+        # Time to maturity for delta calculation (using 3 months as default)
+        time_to_maturity = 0.25
+        
         for strike in strikes:
             # Calculate moneyness (how far from ATM)
             moneyness = strike / center_price - 1 if center_price != 0 else 0
@@ -245,13 +259,35 @@ class VolatilityModel:
             # Ensure vol is reasonable and round to 4 decimal places
             vol = round(min(max(0.1, vol), 0.8), 4)
             
+            # Calculate delta using Bachelier model
+            # For Bachelier: d = (F - K) / (σ * sqrt(T))
+            d = (base_price - strike) / (base_vol * np.sqrt(time_to_maturity))
+            
+            # Delta calculation
+            if option_type.lower() == "call":
+                delta = norm.cdf(d)  # For call
+            else:
+                delta = norm.cdf(d) - 1  # For put
+            
+            # Round delta to 4 decimal places
+            delta = round(delta, 4)
+            
             # For relative_strike, use percentage difference from the center price
             relative_strike = round(100 * (strike / center_price - 1), 2) if center_price != 0 else 0
+            
+            # Identify key delta points (around 0.25, 0.5, 0.75)
+            is_key_delta = False
+            for key_delta in [0.25, 0.5, 0.75]:
+                if abs(delta - key_delta) < 0.05:
+                    is_key_delta = True
+                    break
             
             smile.append({
                 'strike': strike,
                 'volatility': vol,
-                'relative_strike': relative_strike
+                'delta': delta,
+                'relative_strike': relative_strike,
+                'is_key_delta': is_key_delta
             })
         
         # Sort by strike for proper display
@@ -262,10 +298,11 @@ class VolatilityModel:
         return smile
     
     def get_volatility_surface(self, indices: List[str],
-                                evaluation_date: Union[str, datetime],
-                                delivery_date: Union[str, datetime],
-                                base_prices: Optional[Dict[str, float]] = None,
-                                option_strikes: Optional[Dict[str, float]] = None) -> Dict[str, List[Dict[str, float]]]:
+                               evaluation_date: Union[str, datetime],
+                               delivery_date: Union[str, datetime],
+                               base_prices: Optional[Dict[str, float]] = None,
+                               option_strikes: Optional[Dict[str, float]] = None,
+                               option_type: str = "call") -> Dict[str, List[Dict[str, float]]]:
         """
         Generate complete volatility surface data for indices and spreads.
         
@@ -275,6 +312,7 @@ class VolatilityModel:
             delivery_date: The delivery date
             base_prices: Dictionary of base prices for each index/spread
             option_strikes: Dictionary of option strikes for each index/spread
+            option_type: "call" or "put"
         
         Returns:
             Dictionary of volatility smiles for each index/spread
@@ -309,7 +347,9 @@ class VolatilityModel:
                     # Calculate appropriate strikes around the current price
                     current_price = base_prices[index]
                     option_strike = option_strikes.get(index)
-                    result[index] = self.generate_volatility_smile(vol, current_price, option_strike=option_strike)
+                    result[index] = self.generate_volatility_smile(
+                        vol, current_price, option_type, option_strike=option_strike
+                    )
             
             # Spreads
             for spread_name, vol in vols['spreads'].items():
@@ -319,7 +359,9 @@ class VolatilityModel:
                     current_spread = base_prices[spread_name]
                     
                     # Generate volatility smile around both the current spread and the option strike
-                    result[spread_name] = self.generate_volatility_smile(vol, current_spread, option_strike=option_strike)
+                    result[spread_name] = self.generate_volatility_smile(
+                        vol, current_spread, option_type, option_strike=option_strike
+                    )
             
             return result
         except Exception as e:
@@ -328,18 +370,18 @@ class VolatilityModel:
             fallback = {}
             for index in indices:
                 fallback[index] = [
-                    {"strike": 10.0 * 0.9, "volatility": 0.33, "relative_strike": -10.0},
-                    {"strike": 10.0, "volatility": 0.30, "relative_strike": 0.0},
-                    {"strike": 10.0 * 1.1, "volatility": 0.33, "relative_strike": 10.0}
+                    {"strike": 10.0 * 0.9, "volatility": 0.33, "delta": 0.25, "relative_strike": -10.0, "is_key_delta": True},
+                    {"strike": 10.0, "volatility": 0.30, "delta": 0.5, "relative_strike": 0.0, "is_key_delta": True},
+                    {"strike": 10.0 * 1.1, "volatility": 0.33, "delta": 0.75, "relative_strike": 10.0, "is_key_delta": True}
                 ]
             
             # Add a spread smile if needed
             if len(indices) > 1:
                 spread_name = f"{indices[0]}-{indices[1]}"
                 fallback[spread_name] = [
-                    {"strike": 1.0 * 0.5, "volatility": 0.36, "relative_strike": -50.0},
-                    {"strike": 1.0, "volatility": 0.35, "relative_strike": 0.0},
-                    {"strike": 1.0 * 1.5, "volatility": 0.36, "relative_strike": 50.0}
+                    {"strike": 1.0 * 0.5, "volatility": 0.36, "delta": 0.25, "relative_strike": -50.0, "is_key_delta": True},
+                    {"strike": 1.0, "volatility": 0.35, "delta": 0.5, "relative_strike": 0.0, "is_key_delta": True},
+                    {"strike": 1.0 * 1.5, "volatility": 0.36, "delta": 0.75, "relative_strike": 50.0, "is_key_delta": True}
                 ]
             
             return fallback

@@ -27,6 +27,19 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
           size="sm"
         />
         
+        {/* Added Call/Put Selection */}
+        <FormField
+          label="Call/Put"
+          type="select"
+          value={config.call_put || 'call'}
+          onChange={(value) => onConfigChange('call_put', value)}
+          options={[
+            { value: 'call', label: 'Call Option' },
+            { value: 'put', label: 'Put Option' }
+          ]}
+          size="sm"
+        />
+        
         <FormField
           label="Option Style"
           type="select"
@@ -127,7 +140,7 @@ const PricingParameters: React.FC<PricingParametersProps> = ({ config, onConfigC
             </span>
           </div>
           <span className="text-gray-400">
-            Exercise when spread {config.option_type === 'call' ? '>' : '<'} strike
+            Exercise when spread {config.call_put === 'call' ? '>' : '<'} strike
           </span>
         </div>
       </div>

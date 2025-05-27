@@ -11,6 +11,7 @@ export interface PricingConfig {
   deal_type: string;
   option_type: string;
   option_style: string;
+  call_put: string; // 'call' or 'put' - added for backend compatibility
   
   // Indices
   primary_index: string;
@@ -66,6 +67,7 @@ const Pricer: React.FC = () => {
     deal_type: 'regasification',
     option_type: 'vanilla_spread',
     option_style: 'european',
+    call_put: 'call', // Default to call option
     primary_index: 'THE',
     secondary_index: 'TFU',
     output_unit: 'USD/MMBtu',
@@ -166,8 +168,14 @@ const Pricer: React.FC = () => {
     setError(null);
     
     try {
+      // Ensure we pass the call_put value to the backend as option_type
+      const backendConfig = {
+        ...config,
+        option_type: config.call_put // Use call_put value for backend option_type
+      };
+      
       // Call the API to price the option
-      const pricingResults = await pricingApi.priceOption(config);
+      const pricingResults = await pricingApi.priceOption(backendConfig);
       setResults(pricingResults);
     } catch (err: any) {
       setError(err.message || 'Failed to price option. Please check your parameters and try again.');

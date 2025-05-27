@@ -1,6 +1,6 @@
 // src/components/pricing/PricingResults.tsx
 import React, { useState, useEffect } from 'react';
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { PricingConfig, PricingResults as BasePricingResults } from '../Pricer';
 import ModelParameters from './ModelParameters';
 
@@ -9,6 +9,8 @@ export interface VolatilityPoint {
   strike: number;
   volatility: number;
   relative_strike?: number;
+  delta?: number; // Delta field from backend
+  is_key_delta?: boolean; // Flag for key delta points (0.25, 0.5, 0.75)
 }
 
 export interface VolatilitySmilesData {
@@ -34,6 +36,12 @@ export interface PricingResults extends BasePricingResults {
   mc_results?: MonteCarloResults;
   annualized_normal?: number;
   percentage_vol?: number;
+  market_context?: {
+    evaluation_date: string;
+    primary_price: number;
+    secondary_price: number;
+    forward_spreads: number[];
+  };
 }
 
 interface PricingResultsProps {
@@ -45,6 +53,7 @@ interface PricingResultsProps {
 const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, config, onReprice }) => {
   const [editableConfig, setEditableConfig] = useState<PricingConfig>(config);
   const [showVolInPercent, setShowVolInPercent] = useState(true);
+  const [xAxisMode, setXAxisMode] = useState<'delta' | 'strike'>('delta');
   const [visibleSmiles, setVisibleSmiles] = useState({
     primary: false,
     secondary: false,
@@ -93,7 +102,9 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
   const optionValueChartData = Object.entries(results.option_values || {}).map(([date, value]) => {
     const strikePrice = config.secondary_differential - config.primary_differential + config.total_cost_per_option;
     const currentSpread = results.forward_spreads?.[0] || 0;
-    const intrinsicValue = Math.max(0, currentSpread - strikePrice);
+    const intrinsicValue = (config.call_put || config.option_type) === 'call' 
+      ? Math.max(0, currentSpread - strikePrice)
+      : Math.max(0, strikePrice - currentSpread);
     
     return {
       date: new Date(date).toLocaleDateString(),
@@ -103,6 +114,18 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
     };
   });
 
+  // Calculate average prices for percentage volatility calculations
+  const primaryPrice = results.market_context?.primary_price || 10.0;
+  const secondaryPrice = results.market_context?.secondary_price || 9.0;
+  const spreadPrice = Math.abs(primaryPrice - secondaryPrice);
+
+  // Function to convert normal volatility to percentage based on the underlying
+  const convertToPercentage = (vol: number, type: 'primary' | 'secondary' | 'spread') => {
+    const basePrice = type === 'primary' ? primaryPrice : 
+                     type === 'secondary' ? secondaryPrice : spreadPrice;
+    return (vol / Math.max(0.01, basePrice)) * 100;
+  };
+
   // Define colors for the different volatility lines
   const smileColors = {
     primary: '#3B82F6', // Blue for primary index vol
@@ -110,63 +133,37 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
     spread: '#A78BFA',    // Purple for spread vol
   };
 
-  // Extract volatility smile data from results or use mock data if needed
+  // Extract volatility smile data from results
   const primaryIndex = config.primary_index || 'THE';
   const secondaryIndex = config.secondary_index || 'TFU';
   const spreadKey = `${primaryIndex}-${secondaryIndex}`;
 
-  // Create mock data for testing if real data isn't available
-  const mockVolatilityData = {
-    primary: Array.from({ length: 45 }, (_, i) => {
-      const baseStrike = 10.0;
-      const strike = baseStrike * (0.7 + i * 0.02); // From 70% to 150% of base
-      const relativeStrike = ((strike / baseStrike) - 1) * 100;
-      const distFromCenter = Math.abs(strike - baseStrike);
-      const vol = 0.3 + 0.15 * (distFromCenter / baseStrike) ** 2; // U-shaped smile
-      return { strike, volatility: vol, relative_strike: relativeStrike };
-    }),
-    secondary: Array.from({ length: 45 }, (_, i) => {
-      const baseStrike = 9.0;
-      const strike = baseStrike * (0.7 + i * 0.02);
-      const relativeStrike = ((strike / baseStrike) - 1) * 100;
-      const distFromCenter = Math.abs(strike - baseStrike);
-      const vol = 0.33 + 0.17 * (distFromCenter / baseStrike) ** 2;
-      return { strike, volatility: vol, relative_strike: relativeStrike };
-    }),
-    spread: Array.from({ length: 45 }, (_, i) => {
-      const baseStrike = 1.0;
-      const range = 2.0; // From -1.0 to +1.0 around base
-      const strike = baseStrike - range/2 + (range * i / 44);
-      const relativeStrike = ((strike / baseStrike) - 1) * 100;
-      const distFromCenter = Math.abs(strike - baseStrike);
-      const vol = 0.35 + 0.2 * (distFromCenter / Math.max(0.5, Math.abs(baseStrike))) ** 2;
-      return { strike, volatility: vol, relative_strike: relativeStrike };
-    })
-  };
+  // Extract volatility smile data or create fallback data if necessary
+  const primarySmileData = results.volatility_smiles?.[primaryIndex] || [];
+  const secondarySmileData = results.volatility_smiles?.[secondaryIndex] || [];
+  const spreadSmileData = results.volatility_smiles?.[spreadKey] || [];
 
-  // Extract volatility smile data from results or use mock data
-  const primarySmileData = results.volatility_smiles?.[primaryIndex] || mockVolatilityData.primary;
-  const secondarySmileData = results.volatility_smiles?.[secondaryIndex] || mockVolatilityData.secondary;
-  const spreadSmileData = results.volatility_smiles?.[spreadKey] || mockVolatilityData.spread;
-
-  // Calculate appropriate domain for X axis based on visible data
+  // Calculate appropriate domain for X axis based on visible data and mode
   const calculateXDomain = () => {
-    // Always use absolute strikes now, regardless of percentage mode
-    const allStrikes = [
-      ...(visibleSmiles.primary ? primarySmileData.map(p => p.strike) : []),
-      ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.strike) : []),
-      ...(visibleSmiles.spread ? spreadSmileData.map(p => p.strike) : [])
-    ];
-    
-    if (allStrikes.length === 0) return ['auto', 'auto'];
-    
-    // Calculate meaningful min/max by adding some padding
-    const minStrike = Math.min(...allStrikes);
-    const maxStrike = Math.max(...allStrikes);
-    const range = maxStrike - minStrike;
-    
-    // Return domain with some padding on both sides
-    return [minStrike - range * 0.05, maxStrike + range * 0.05];
+    if (xAxisMode === 'delta') {
+      // For delta, we focus on the range [0.1, 0.9]
+      return [0.1, 0.9];
+    } else {
+      // For strike, we need to calculate the actual min/max from the data
+      const allStrikes = [
+        ...(visibleSmiles.primary ? primarySmileData.map(p => p.strike) : []),
+        ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.strike) : []),
+        ...(visibleSmiles.spread ? spreadSmileData.map(p => p.strike) : [])
+      ];
+      
+      if (allStrikes.length === 0) return ['auto', 'auto'];
+      
+      const minStrike = Math.min(...allStrikes);
+      const maxStrike = Math.max(...allStrikes);
+      const range = maxStrike - minStrike;
+      
+      return [minStrike - range * 0.05, maxStrike + range * 0.05];
+    }
   };
 
   // Calculate appropriate domain for Y axis based on visible data
@@ -174,13 +171,19 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
     // Using percentage view for volatilities
     if (showVolInPercent) {
       const allVols = [
-        ...(visibleSmiles.primary ? primarySmileData.map(p => p.volatility * 100) : []),
-        ...(visibleSmiles.secondary ? secondarySmileData.map(p => p.volatility * 100) : []),
-        ...(visibleSmiles.spread ? spreadSmileData.map(p => p.volatility * 100) : [])
+        ...(visibleSmiles.primary ? primarySmileData.map(p => convertToPercentage(p.volatility, 'primary')) : []),
+        ...(visibleSmiles.secondary ? secondarySmileData.map(p => convertToPercentage(p.volatility, 'secondary')) : []),
+        ...(visibleSmiles.spread ? spreadSmileData.map(p => convertToPercentage(p.volatility, 'spread')) : [])
       ];
       
       if (allVols.length === 0) return ['auto', 'auto'];
-      return [Math.min(...allVols) * 0.9, Math.max(...allVols) * 1.1];
+      
+      // Ensure a reasonable minimum to avoid scaling issues
+      const minVol = Math.min(...allVols);
+      const maxVol = Math.max(...allVols);
+      const range = maxVol - minVol;
+      
+      return [Math.max(0, minVol - range * 0.1), maxVol + range * 0.1];
     } 
     // Using normal view for volatilities
     else {
@@ -191,7 +194,12 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
       ];
       
       if (allVols.length === 0) return ['auto', 'auto'];
-      return [Math.min(...allVols) * 0.9, Math.max(...allVols) * 1.1];
+      
+      const minVol = Math.min(...allVols);
+      const maxVol = Math.max(...allVols);
+      const range = maxVol - minVol;
+      
+      return [Math.max(0, minVol - range * 0.1), maxVol + range * 0.1];
     }
   };
 
@@ -222,30 +230,30 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
 
       <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
         <h3 className="text-base font-semibold text-white mb-4">Pricing Results</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-          <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
-            <p className="text-xl font-bold text-blue-400">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-4">
+          <div className="text-center p-2 bg-gray-750 rounded-md border border-gray-600">
+            <p className="text-lg font-bold text-blue-400">
               {results.total_value?.toFixed(4) ?? 'N/A'}
             </p>
-            <p className="text-gray-400 text-xs mt-1">Option Value ({config.output_unit})</p>
+            <p className="text-gray-400 text-xs">Option Value ({config.output_unit})</p>
           </div>
-          <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
-            <p className="text-xl font-bold text-green-400">
+          <div className="text-center p-2 bg-gray-750 rounded-md border border-gray-600">
+            <p className="text-lg font-bold text-green-400">
               ${(results.total_value * config.cargo_volume * config.num_options)?.toLocaleString() ?? 'N/A'}
             </p>
-            <p className="text-gray-400 text-xs mt-1">Total Contract Value</p>
+            <p className="text-gray-400 text-xs">Total Contract Value</p>
           </div>
-          <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
-            <p className="text-xl font-bold text-purple-400">
+          <div className="text-center p-2 bg-gray-750 rounded-md border border-gray-600">
+            <p className="text-lg font-bold text-purple-400">
               {results.portfolio_greeks?.delta?.toFixed(4) ?? 'N/A'}
             </p>
-            <p className="text-gray-400 text-xs mt-1">Portfolio Delta</p>
+            <p className="text-gray-400 text-xs">Portfolio Delta</p>
           </div>
-          <div className="text-center p-3 bg-gray-750 rounded-md border border-gray-600">
-            <p className="text-xl font-bold text-yellow-400">
+          <div className="text-center p-2 bg-gray-750 rounded-md border border-gray-600">
+            <p className="text-lg font-bold text-yellow-400">
               {results.percentage_vol?.toFixed(2)}%
             </p>
-            <p className="text-gray-400 text-xs mt-1">Implied Volatility</p>
+            <p className="text-gray-400 text-xs">Implied Volatility</p>
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -282,13 +290,31 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
         <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
           <h3 className="text-base font-semibold text-white mb-1">Volatility Smiles</h3>
           
-          {/* Display mode toggle at the top */}
-          <div className="flex justify-between items-center mb-2 mt-1">
-            <span className="text-xs text-gray-400">Display mode:</span>
+          {/* Toggle controls for display mode and x-axis */}
+          <div className="flex justify-center items-center mb-3 mt-1 space-x-4">
+            <div className="flex items-center bg-gray-700 rounded-lg p-1">
+              <button
+                onClick={() => setXAxisMode('delta')}
+                className={`px-4 py-1 text-xs rounded transition-colors duration-150 ${
+                  xAxisMode === 'delta' ? 'bg-gray-600 text-white' : 'text-gray-300 hover:text-white'
+                }`}
+              >
+                Delta
+              </button>
+              <button
+                onClick={() => setXAxisMode('strike')}
+                className={`px-4 py-1 text-xs rounded transition-colors duration-150 ${
+                  xAxisMode === 'strike' ? 'bg-gray-600 text-white' : 'text-gray-300 hover:text-white'
+                }`}
+              >
+                Strike
+              </button>
+            </div>
+            
             <div className="flex items-center bg-gray-700 rounded-lg p-1">
               <button
                 onClick={() => setShowVolInPercent(false)}
-                className={`px-3 py-1 text-xs rounded transition-colors duration-150 ${
+                className={`px-4 py-1 text-xs rounded transition-colors duration-150 ${
                   !showVolInPercent ? 'bg-gray-600 text-white' : 'text-gray-300 hover:text-white'
                 }`}
               >
@@ -296,7 +322,7 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
               </button>
               <button
                 onClick={() => setShowVolInPercent(true)}
-                className={`px-3 py-1 text-xs rounded transition-colors duration-150 ${
+                className={`px-4 py-1 text-xs rounded transition-colors duration-150 ${
                   showVolInPercent ? 'bg-gray-600 text-white' : 'text-gray-300 hover:text-white'
                 }`}
               >
@@ -305,18 +331,18 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
             </div>
           </div>
           
-          <div className="h-64 md:h-80 flex items-center justify-center">
+          <div className="h-72 md:h-96 flex items-center justify-center">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart margin={{ top: 15, right: 30, left: 0, bottom: 20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis 
-                  dataKey="strike" 
+                  dataKey={xAxisMode === 'delta' ? 'delta' : 'strike'} 
                   stroke="#9CA3AF" 
                   tick={{ fontSize: 10 }} 
                   type="number" 
                   domain={calculateXDomain()}
                   label={{ 
-                    value: "Strike", 
+                    value: xAxisMode === 'delta' ? "Delta" : "Strike", 
                     position: "insideBottom", 
                     dy: 15, 
                     fontSize: 10, 
@@ -345,62 +371,91 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
                     const actualValue = typeof value === 'function' ? value : value;
                     
                     if (name === 'volatility' || name.includes('Vol')) {
-                      return showVolInPercent ? 
-                        [`${(actualValue * 100).toFixed(2)}%`, 'Volatility'] : 
-                        [actualValue.toFixed(4), 'Normal Vol'];
+                      if (showVolInPercent) {
+                        // Determine which type of line we're dealing with
+                        let lineType: 'primary' | 'secondary' | 'spread' = 'spread';
+                        if (name.includes(primaryIndex)) lineType = 'primary';
+                        else if (name.includes(secondaryIndex)) lineType = 'secondary';
+                        
+                        // If it's already a percentage, don't recalculate
+                        if (actualValue > 1 && actualValue < 1000) {
+                          return [`${actualValue.toFixed(2)}%`, 'Volatility'];
+                        }
+                        
+                        // Otherwise, calculate the percentage
+                        const pctValue = convertToPercentage(actualValue, lineType);
+                        return [`${pctValue.toFixed(2)}%`, 'Volatility'];
+                      } else {
+                        return [actualValue.toFixed(4), 'Normal Vol'];
+                      }
                     }
                     return [actualValue.toFixed(4), name];
                   }}
                   labelFormatter={(label: any) => {
-                    return `Strike: ${typeof label === 'number' ? label.toFixed(4) : label}`;
+                    const labelName = xAxisMode === 'delta' ? 'Delta' : 'Strike';
+                    return `${labelName}: ${typeof label === 'number' ? label.toFixed(4) : label}`;
                   }}
                 />
+                
+                {/* Reference lines for key deltas */}
+                {xAxisMode === 'delta' && (
+                  <>
+                    <ReferenceLine x={0.25} stroke="#6B7280" strokeDasharray="3 3" />
+                    <ReferenceLine x={0.5} stroke="#6B7280" strokeDasharray="3 3" />
+                    <ReferenceLine x={0.75} stroke="#6B7280" strokeDasharray="3 3" />
+                  </>
+                )}
                 
                 {visibleSmiles.primary && primarySmileData.length > 0 && (
                   <Line 
                     type="monotone" 
                     dataKey={showVolInPercent ? 
-                      ((entry: VolatilityPoint) => entry.volatility * 100) : 
+                      ((entry: VolatilityPoint) => convertToPercentage(entry.volatility, 'primary')) : 
                       "volatility"
                     }
                     data={primarySmileData} 
                     stroke={smileColors.primary} 
-                    name={`${primaryIndex} Vol`} 
+                    name={`${primaryIndex}`} 
                     dot={false} 
                     strokeWidth={2}
                     activeDot={{ r: 4 }}
                   />
                 )}
+                
                 {visibleSmiles.secondary && secondarySmileData.length > 0 && (
                   <Line 
                     type="monotone" 
                     dataKey={showVolInPercent ? 
-                      ((entry: VolatilityPoint) => entry.volatility * 100) : 
+                      ((entry: VolatilityPoint) => convertToPercentage(entry.volatility, 'secondary')) : 
                       "volatility"
                     }
                     data={secondarySmileData} 
                     stroke={smileColors.secondary} 
-                    name={`${secondaryIndex} Vol`} 
+                    name={`${secondaryIndex}`} 
                     dot={false} 
                     strokeWidth={2}
                     activeDot={{ r: 4 }}
                   />
                 )}
+                
                 {visibleSmiles.spread && spreadSmileData.length > 0 && (
                   <Line 
                     type="monotone" 
                     dataKey={showVolInPercent ? 
-                      ((entry: VolatilityPoint) => entry.volatility * 100) : 
+                      ((entry: VolatilityPoint) => convertToPercentage(entry.volatility, 'spread')) : 
                       "volatility"
                     }
                     data={spreadSmileData} 
                     stroke={smileColors.spread} 
-                    name="Spread Vol" 
+                    name="Spread" 
                     dot={false} 
                     strokeWidth={2}
                     activeDot={{ r: 4 }}
                   />
                 )}
+                
+                {/* Hide the standard Legend */}
+                <Legend wrapperStyle={{ display: 'none' }} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -430,35 +485,41 @@ const PricingResultsComponent: React.FC<PricingResultsProps> = ({ results, confi
 
         {/* Option Value Breakdown Chart */}
         <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
-          <h3 className="text-base font-semibold text-white mb-3">Option Value Breakdown</h3>
-          <div className="h-64 md:h-80">
+          <h3 className="text-base font-semibold text-white mb-3 flex justify-between">
+            <span>Option Value Breakdown</span>
+            <div className="text-xs text-gray-400 flex items-center space-x-2">
+              <div className="flex items-center">
+                <span className="inline-block w-3 h-3 bg-green-500 mr-1"></span>
+                <span>Intrinsic Value</span>
+              </div>
+              <div className="flex items-center">
+                <span className="inline-block w-3 h-3 bg-blue-500 mr-1"></span>
+                <span>Time Value</span>
+              </div>
+            </div>
+          </h3>
+          <div className="h-72 md:h-96">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart 
                 data={optionValueChartData} 
-                margin={{ top: 0, right: 10, left: 10, bottom: 20 }}
-                barSize={getBarSize(optionValueChartData.length)}
+                margin={{ top: 5, right: 30, left: 20, bottom: 30 }}
+                barSize={80}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis 
                   dataKey="date" 
                   stroke="#9CA3AF" 
                   tick={{ fontSize: 10 }} 
-                  padding={{ left: optionValueChartData.length <= 1 ? 100 : 10, right: optionValueChartData.length <= 1 ? 100 : 10 }}
                 />
                 <YAxis 
                   stroke="#9CA3AF" 
                   tick={{ fontSize: 10 }} 
                   tickFormatter={(tick: number) => tick.toFixed(3)} 
+                  domain={[0, (dataMax: number) => Math.max(dataMax * 1.1, 0.1)]}
                 />
                 <Tooltip 
                   contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: '6px', color: '#F9FAFB', fontSize: '12px' }}
                   formatter={(value: number) => value.toFixed(4)}
-                />
-                <Legend
-                  layout="horizontal"
-                  verticalAlign="bottom"
-                  align="center"
-                  wrapperStyle={{ paddingTop: 10, marginBottom: -10 }}
                 />
                 <Bar 
                   dataKey="intrinsic" 
