@@ -13,8 +13,7 @@ logger = logging.getLogger(__name__)
 
 class VolatilityModel:
     """
-    General volatility model that can calculate volatilities for 
-    any indices and their spreads, suitable for all option types.
+    Volatility model using Heston stochastic volatility.
     """
     
     def __init__(self, data_provider=None):
@@ -25,10 +24,6 @@ class VolatilityModel:
             data_provider: Optional data provider instance
         """
         self.data_provider = data_provider
-        self.historical_data_cache = {}  # Cache for historical data
-        
-        # Create an instance of the SpreadVolatilityModel for calculating spread volatilities
-        self.spread_vol_model = SpreadVolatilityModel()
         
         # Default volatilities to use when historical data is not available
         self.default_volatilities = {
@@ -38,6 +33,31 @@ class VolatilityModel:
             'DES': 0.38,
             'NBP': 0.33,
             'HH': 0.45,
+        }
+        
+        # Default Heston parameters for different indices
+        self.default_heston_params = {
+            'default': {
+                'v0': 0.04,      # Initial variance
+                'kappa': 1.5,    # Mean reversion speed
+                'theta': 0.04,   # Long-run variance
+                'sigma': 0.3,    # Vol of vol
+                'rho': -0.7      # Correlation
+            },
+            'THE': {
+                'v0': 0.05,
+                'kappa': 1.2,
+                'theta': 0.05,
+                'sigma': 0.35,
+                'rho': -0.65
+            },
+            'TFU': {
+                'v0': 0.04,
+                'kappa': 1.3,
+                'theta': 0.04,
+                'sigma': 0.3,
+                'rho': -0.7
+            }
         }
     
     def calculate_volatility(self, indices: List[str], 
@@ -62,6 +82,10 @@ class VolatilityModel:
         if isinstance(delivery_date, str):
             delivery_date = datetime.strptime(delivery_date, '%Y-%m-%d')
         
+        # Calculate time to delivery in years
+        days_to_delivery = max(1, (delivery_date - evaluation_date).days)
+        time_to_maturity = days_to_delivery / 365.0
+        
         # Calculate historical start date
         historical_start = evaluation_date - timedelta(days=historical_length)
         
@@ -74,7 +98,7 @@ class VolatilityModel:
                     start_date_str = historical_start.strftime('%Y-%m-%d')
                     end_date_str = evaluation_date.strftime('%Y-%m-%d')
                     
-                    # Fetch historical data - only load data, no vol calculation
+                    # Fetch historical data
                     historical_data[index] = self.data_provider.fetch_data(
                         index, start_date_str, end_date_str)
                 else:
@@ -90,221 +114,214 @@ class VolatilityModel:
                 historical_data[index] = pd.Series(
                     np.random.normal(10, 0.5, len(dates)), index=dates)
         
-        # Calculate individual volatilities using SpreadVolatilityModel
+        # Calculate individual volatilities and Heston parameters
         individual_vols = {}
-        for index in indices:
-            # Use SpreadVolatilityModel for individual vol calculation
-            vol = self.spread_vol_model.get_volatility_from_historical_data(
-                historical_data[index], 
-                pd.Series(),  # Empty series for second asset (not needed for single index)
-                delivery_date
-            )
-            individual_vols[index] = vol
+        heston_params = {}
         
-        # Calculate spread volatilities for all pairs and their smiles
+        for index in indices:
+            # Calculate historical volatility first
+            vol = self.estimate_volatility_from_historical_data(historical_data[index])
+            individual_vols[index] = vol
+            
+            # Calibrate Heston parameters based on historical data
+            params = self.calibrate_heston_parameters(index, vol, time_to_maturity)
+            heston_params[index] = params
+        
+        # Calculate spread volatilities and parameters
         spread_vols = {}
-        volatility_smiles = {}
+        spread_heston_params = {}
         
         if len(indices) > 1:
             for i, index1 in enumerate(indices):
-                # Add individual smile
-                try:
-                    price1 = historical_data[index1].iloc[-1] if len(historical_data[index1]) > 0 else 10.0
-                    volatility_smiles[index1] = self.generate_volatility_smile(
-                        individual_vols[index1], price1
-                    )
-                except Exception as e:
-                    logger.error(f"Error generating smile for {index1}: {e}")
-                
                 for j, index2 in enumerate(indices):
                     if i < j:  # Avoid duplicate pairs and self-pairs
                         spread_name = f"{index1}-{index2}"
                         
-                        # Use SpreadVolatilityModel for spread vol calculation
                         try:
-                            vol = self.spread_vol_model.get_volatility_from_historical_data(
-                                historical_data[index1],
-                                historical_data[index2],
-                                delivery_date
-                            )
-                            spread_vols[spread_name] = vol
+                            # Align the series on matching dates
+                            aligned_data = pd.DataFrame({
+                                'asset1': historical_data[index1],
+                                'asset2': historical_data[index2]
+                            }).dropna()
                             
-                            # Calculate the current spread value
-                            price1 = historical_data[index1].iloc[-1] if len(historical_data[index1]) > 0 else 10.0
-                            price2 = historical_data[index2].iloc[-1] if len(historical_data[index2]) > 0 else 9.0
-                            spread_price = price1 - price2
+                            # Calculate the spread series
+                            spread_series = aligned_data['asset1'] - aligned_data['asset2']
                             
-                            # Generate volatility smile for the spread
-                            volatility_smiles[spread_name] = self.generate_volatility_smile(
-                                vol, spread_price
-                            )
+                            # Calculate volatility of the spread
+                            spread_vol = self.estimate_volatility_from_historical_data(spread_series)
+                            spread_vols[spread_name] = spread_vol
+                            
+                            # Calculate correlation between the two assets
+                            correlation = aligned_data['asset1'].corr(aligned_data['asset2'])
+                            
+                            # Calibrate Heston parameters for the spread
+                            spread_params = self.calibrate_spread_heston_parameters(
+                                index1, index2, spread_vol, correlation, heston_params, time_to_maturity)
+                            
+                            spread_heston_params[spread_name] = spread_params
+                            
                         except Exception as e:
                             logger.error(f"Error calculating spread vol for {spread_name}: {e}")
-                            spread_vols[spread_name] = 0.35  # Default fallback
+                            # Use a simple approximation based on individual vols
+                            vol1 = individual_vols[index1]
+                            vol2 = individual_vols[index2]
+                            # Assume correlation of 0.5 as fallback
+                            corr = 0.5
+                            spread_vol = np.sqrt(vol1**2 + vol2**2 - 2 * corr * vol1 * vol2)
+                            spread_vols[spread_name] = spread_vol
                             
-                            # Generate default smile
-                            price1 = historical_data[index1].iloc[-1] if len(historical_data[index1]) > 0 else 10.0
-                            price2 = historical_data[index2].iloc[-1] if len(historical_data[index2]) > 0 else 9.0
-                            spread_price = price1 - price2
-                            volatility_smiles[spread_name] = self.generate_volatility_smile(
-                                0.35, spread_price
-                            )
-        else:
-            # Just one index, add its smile
-            index = indices[0]
-            try:
-                price = historical_data[index].iloc[-1] if len(historical_data[index]) > 0 else 10.0
-                volatility_smiles[index] = self.generate_volatility_smile(
-                    individual_vols[index], price
-                )
-            except Exception as e:
-                logger.error(f"Error generating smile for {index}: {e}")
+                            # Use default spread Heston parameters
+                            spread_heston_params[spread_name] = self.default_heston_params['default']
         
         return {
             'individual': individual_vols,
             'spreads': spread_vols,
-            'smiles': volatility_smiles
+            'heston_params': heston_params,
+            'spread_heston_params': spread_heston_params,
+            'time_to_maturity': time_to_maturity
         }
     
-    def generate_volatility_smile(self, base_vol: float, 
-                                  base_price: float,
-                                  option_type: str = "call",
-                                  strikes: Optional[List[float]] = None,
-                                  option_strike: Optional[float] = None) -> List[Dict[str, float]]:
+    def estimate_volatility_from_historical_data(self, price_series: pd.Series) -> float:
         """
-        Generate a volatility smile around a base volatility with proper points
-        including delta values for key points.
+        Calculate historical volatility from price series.
         
         Args:
-            base_vol: Base ATM volatility
-            base_price: Current price or spread value (forward)
-            option_type: "call" or "put"
-            strikes: Optional list of strike prices
-            option_strike: The actual option strike price (if available)
+            price_series: Historical price series
             
         Returns:
-            List of dictionaries with strike, volatility, delta pairs
+            float: Estimated annualized volatility
         """
-        # Safety check for base_price
-        if base_price == 0:
-            logger.warning("Base price is zero, using default value of 1.0")
-            base_price = 1.0
+        # Ensure data is sorted chronologically
+        price_series = price_series.sort_index()
         
-        # Round for cleaner calculations
-        base_price = round(base_price, 4)
-        base_vol = round(base_vol, 4)
+        # For normal model, use absolute price changes
+        price_changes = price_series.diff().dropna()
         
-        # If we have an option strike, use that as the center for our smile
-        center_price = option_strike if option_strike is not None else base_price
+        # Calculate daily volatility (standard deviation of changes)
+        daily_vol = price_changes.std()
         
-        if strikes is None:
-            # For spread options, determine wider range to ensure we capture 0.25-0.75 delta
-            # For indices, use a narrower range
-            if abs(base_price) < 2.0:  # Likely a spread
-                # Use a wider range for spreads to capture delta range
-                range_min = center_price - max(1.0, abs(center_price))
-                range_max = center_price + max(1.0, abs(center_price))
-            else:
-                # Use a narrower range for indices
-                range_min = center_price * 0.5
-                range_max = center_price * 1.5
-            
-            # Create at least 45 points with concentration around the key values
-            num_points = 45
-            
-            # Generate an array of strikes
-            strikes = []
-            
-            # Ensure both the strike and forward are in the list exactly
-            strikes.append(round(center_price, 4))
-            if abs(center_price - base_price) > 0.0001:  # Only add if different from center price
-                strikes.append(round(base_price, 4))
-            
-            # Distribute remaining points (or 44 if strike=forward)
-            remaining_points = num_points - len(strikes)
-            
-            # Add points between range_min and range_max
-            step = (range_max - range_min) / (remaining_points + 1)
-            for i in range(remaining_points):
-                new_strike = range_min + step * (i + 1)
-                # Skip if too close to existing points
-                if all(abs(new_strike - s) > 0.001 for s in strikes):
-                    strikes.append(round(new_strike, 4))
-            
-            # Sort strikes
-            strikes.sort()
-            
-            logger.info(f"Generated {len(strikes)} volatility points from {strikes[0]} to {strikes[-1]}")
-            logger.info(f"Strike price: {center_price}, Forward price: {base_price}")
+        # Annualize (assuming 252 trading days)
+        annualized_vol = daily_vol * np.sqrt(252)
         
-        # Generate volatility smile with delta values
-        smile = []
+        # Ensure minimum volatility
+        return max(0.01, annualized_vol)
+    
+    def calibrate_heston_parameters(self, index, base_vol, time_to_maturity):
+        """
+        Calibrate Heston model parameters based on the index and base volatility.
         
-        # Time to maturity for delta calculation (using 3 months as default)
-        time_to_maturity = 0.25
+        Args:
+            index: Index name
+            base_vol: Base ATM volatility (normal)
+            time_to_maturity: Time to maturity in years
+            
+        Returns:
+            Dict: Calibrated Heston parameters
+        """
+        # Get default parameters for this index or use general defaults
+        default_params = self.default_heston_params.get(index, self.default_heston_params['default'])
         
-        for strike in strikes:
-            # Calculate moneyness (how far from ATM)
-            moneyness = strike / center_price - 1 if center_price != 0 else 0
-            
-            # Apply smile effect - more pronounced for extreme strikes
-            smile_factor = 1 + 0.7 * moneyness**2  # Increased for more pronounced smile
-            
-            # Skew effect - typically higher volatilities for lower strikes (put skew)
-            skew_factor = 1 - 0.2 * moneyness  # Increased for more skew
-            
-            # Combine effects
-            vol = base_vol * smile_factor * skew_factor
-            
-            # Ensure vol is reasonable and round to 4 decimal places
-            vol = round(min(max(0.1, vol), 0.8), 4)
-            
-            # Calculate delta using Bachelier model
-            # For Bachelier: d = (F - K) / (σ * sqrt(T))
-            d = (base_price - strike) / (base_vol * np.sqrt(time_to_maturity))
-            
-            # Delta calculation
-            if option_type.lower() == "call":
-                delta = norm.cdf(d)  # For call
-            else:
-                delta = norm.cdf(d) - 1  # For put
-            
-            # Round delta to 4 decimal places
-            delta = round(delta, 4)
-            
-            # For relative_strike, use percentage difference from the center price
-            relative_strike = round(100 * (strike / center_price - 1), 2) if center_price != 0 else 0
-            
-            # Identify key delta points (around 0.25, 0.5, 0.75)
-            is_key_delta = False
-            for key_delta in [0.25, 0.5, 0.75]:
-                if abs(delta - key_delta) < 0.05:
-                    is_key_delta = True
-                    break
-            
-            smile.append({
-                'strike': strike,
-                'volatility': vol,
-                'delta': delta,
-                'relative_strike': relative_strike,
-                'is_key_delta': is_key_delta
-            })
+        # Adjust v0 (initial variance) based on base volatility 
+        # For normal vol, we need to convert to percentage vol for Heston
+        # Assume average price of 10 for conversion
+        avg_price = 10.0
+        percentage_vol = base_vol / avg_price
+        v0 = percentage_vol**2  # Initial variance is square of percentage volatility
         
-        # Sort by strike for proper display
-        smile.sort(key=lambda x: x['strike'])
+        # Adjust long-run variance (theta) to match initial variance
+        theta = v0
         
-        logger.info(f"Generated volatility smile with {len(smile)} points")
+        # Higher vol usually means higher vol-of-vol
+        sigma = default_params['sigma'] * np.sqrt(v0 / default_params['v0'])
         
-        return smile
+        # Time to maturity affects skew
+        rho = default_params['rho']
+        if time_to_maturity < 0.25:
+            rho = default_params['rho'] * 1.2  # More negative correlation for short-dated
+        elif time_to_maturity > 1.0:
+            rho = default_params['rho'] * 0.8  # Less negative correlation for long-dated
+        
+        # Keep mean reversion speed (kappa) from defaults
+        kappa = default_params['kappa']
+        
+        return {
+            'v0': v0,
+            'kappa': kappa,
+            'theta': theta,
+            'sigma': sigma,
+            'rho': rho
+        }
+    
+    def calibrate_spread_heston_parameters(self, index1, index2, spread_vol, correlation, heston_params, time_to_maturity):
+        """
+        Calibrate Heston parameters for spread options based on individual assets.
+        
+        Args:
+            index1: First index name
+            index2: Second index name
+            spread_vol: Volatility of the spread
+            correlation: Correlation between the assets
+            heston_params: Heston parameters for individual indices
+            time_to_maturity: Time to maturity in years
+            
+        Returns:
+            Dict: Calibrated spread Heston parameters
+        """
+        # Get Heston parameters for individual indices
+        params1 = heston_params.get(index1, self.default_heston_params['default'])
+        params2 = heston_params.get(index2, self.default_heston_params['default'])
+        
+        # Average price for conversion (placeholder, should use actual prices)
+        avg_price = 10.0
+        percentage_vol = spread_vol / avg_price
+        
+        # Initial variance based on spread vol
+        v0 = percentage_vol**2
+        
+        # Long-run variance matches initial
+        theta = v0
+        
+        # Mean reversion speed - average of individual assets
+        kappa = (params1['kappa'] + params2['kappa']) / 2.0
+        
+        # Vol of vol - conservative approach using max
+        sigma = max(params1['sigma'], params2['sigma'])
+        
+        # Correlation parameter - more negative for spreads
+        base_rho = (params1['rho'] + params2['rho']) / 2.0
+        # Adjust based on asset correlation
+        if correlation > 0.7:
+            # High positive correlation means more negative spread rho
+            rho = base_rho * 1.2
+        elif correlation < 0.3:
+            # Low correlation means less negative spread rho
+            rho = base_rho * 0.8
+        else:
+            rho = base_rho
+        
+        # Adjust rho based on time to maturity
+        if time_to_maturity < 0.25:
+            rho *= 1.2  # More pronounced skew for short-dated
+        elif time_to_maturity > 1.0:
+            rho *= 0.8  # Less pronounced skew for long-dated
+        
+        return {
+            'v0': v0,
+            'kappa': kappa,
+            'theta': theta,
+            'sigma': sigma,
+            'rho': rho
+        }
     
     def get_volatility_surface(self, indices: List[str],
-                               evaluation_date: Union[str, datetime],
-                               delivery_date: Union[str, datetime],
-                               base_prices: Optional[Dict[str, float]] = None,
-                               option_strikes: Optional[Dict[str, float]] = None,
-                               option_type: str = "call") -> Dict[str, List[Dict[str, float]]]:
+                            evaluation_date: Union[str, datetime],
+                            delivery_date: Union[str, datetime],
+                            base_prices: Optional[Dict[str, float]] = None,
+                            option_strikes: Optional[Dict[str, float]] = None,
+                            option_type: str = "call",
+                            time_to_maturity: Optional[float] = None) -> Dict[str, List[Dict[str, float]]]:
         """
-        Generate complete volatility surface data for indices and spreads.
+        Generate complete volatility surface data for indices and spreads using Heston model.
         
         Args:
             indices: List of indices to generate volatility surface for
@@ -313,22 +330,51 @@ class VolatilityModel:
             base_prices: Dictionary of base prices for each index/spread
             option_strikes: Dictionary of option strikes for each index/spread
             option_type: "call" or "put"
+            time_to_maturity: Optional explicit time to maturity (in years)
         
         Returns:
             Dictionary of volatility smiles for each index/spread
         """
         try:
-            # Calculate base volatilities
-            vols = self.calculate_volatility(indices, evaluation_date, delivery_date)
+            # Use provided time_to_maturity if available
+            if time_to_maturity is None:
+                # Calculate time to maturity from evaluation date to delivery date
+                if isinstance(evaluation_date, str):
+                    evaluation_date = datetime.strptime(evaluation_date, '%Y-%m-%d')
+                if isinstance(delivery_date, str):
+                    delivery_date = datetime.strptime(delivery_date, '%Y-%m-%d')
+                    
+                # Calculate time to maturity in years
+                days_to_delivery = max(1, (delivery_date - evaluation_date).days)
+                time_to_maturity = days_to_delivery / 365.0
+            
+            # Ensure reasonable time to maturity (minimum 0.01 years ~ 3-4 days)
+            time_to_maturity = max(0.01, time_to_maturity)
+            
+            logger.info(f"Generating volatility surface for indices: {indices}")
+            logger.info(f"Using time to maturity: {time_to_maturity} years")
+            logger.info(f"First delivery date: {delivery_date}")
+            
+            # Calculate base volatilities and Heston parameters
+            vols_data = self.calculate_volatility(indices, evaluation_date, delivery_date)
+            base_vols = vols_data['individual']
+            spread_vols = vols_data['spreads']
+            heston_params = vols_data['heston_params']
+            spread_heston_params = vols_data['spread_heston_params']
+            time_to_maturity = vols_data['time_to_maturity']
+            
+            logger.info(f"Time to maturity: {time_to_maturity} years")
             
             # If base prices not provided, create dummy values
             if base_prices is None:
                 base_prices = {index: 10.0 for index in indices}
-                
+            
+            logger.info(f"Base prices for volatility calculation: {base_prices}")
+            
             # If option strikes not provided, initialize empty dict
             if option_strikes is None:
                 option_strikes = {}
-                    
+            
             # Add spread prices if not provided
             if len(indices) > 1:
                 for i, index1 in enumerate(indices):
@@ -342,308 +388,490 @@ class VolatilityModel:
             result = {}
             
             # Individual indices
-            for index, vol in vols['individual'].items():
+            for index, vol in base_vols.items():
                 if index in base_prices:
-                    # Calculate appropriate strikes around the current price
-                    current_price = base_prices[index]
+                    # Get Heston parameters for this index
+                    params = heston_params.get(index, self.default_heston_params['default'])
+                    
+                    # Calculate smile around the current price
+                    forward = base_prices[index]
                     option_strike = option_strikes.get(index)
-                    result[index] = self.generate_volatility_smile(
-                        vol, current_price, option_type, option_strike=option_strike
+                    
+                    result[index] = self.generate_heston_smile(
+                        forward, vol, time_to_maturity, option_type, params, option_strike
                     )
             
             # Spreads
-            for spread_name, vol in vols['spreads'].items():
+            for spread_name, vol in spread_vols.items():
                 if spread_name in base_prices:
-                    # Get the option strike for this spread if available
-                    option_strike = option_strikes.get(spread_name)
-                    current_spread = base_prices[spread_name]
+                    # Get Heston parameters for this spread
+                    params = spread_heston_params.get(spread_name, self.default_heston_params['default'])
                     
-                    # Generate volatility smile around both the current spread and the option strike
-                    result[spread_name] = self.generate_volatility_smile(
-                        vol, current_spread, option_type, option_strike=option_strike
+                    # Calculate smile around the current price
+                    forward = base_prices[spread_name]
+                    option_strike = option_strikes.get(spread_name)
+                    
+                    result[spread_name] = self.generate_heston_smile(
+                        forward, vol, time_to_maturity, option_type, params, option_strike
                     )
             
+            logger.info(f"Volatility surface keys: {list(result.keys())}")
+            
+            # Log sample data from spread smile for debugging
+            spread_key = f"{indices[0]}-{indices[1]}" if len(indices) > 1 else None
+            if spread_key and spread_key in result:
+                spread_data = result[spread_key]
+                if spread_data:
+                    logger.info(f"Spread volatility data: {spread_data[:2]}...")
+                    
+                    # Find volatility at the strike
+                    if spread_key in option_strikes:
+                        strike = option_strikes[spread_key]
+                        forward = base_prices[spread_key]
+                        logger.info(f"Forward spread value: {forward}")
+                        logger.info(f"Strike value: {strike}")
+                        
+                        # Find the vol point closest to the strike
+                        closest_point = min(spread_data, key=lambda p: abs(p['strike'] - strike))
+                        logger.info(f"Found volatility {closest_point['volatility']} at strike {closest_point['strike']} (delta: {closest_point['delta']})")
+                        
+                        # Calculate percentage vol for this point
+                        percentage_vol = (closest_point['volatility'] / max(0.01, abs(forward))) * 100
+                        logger.info(f"Percentage vol = {closest_point['volatility']} / {max(0.01, abs(forward))} * 100 = {percentage_vol}%")
+                    
             return result
+            
         except Exception as e:
             logger.error(f"Error in get_volatility_surface: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            
             # Create a minimal set of fallback volatility smiles
             fallback = {}
             for index in indices:
+                forward = base_prices.get(index, 10.0)
+                normal_vol = 0.3  # Default fallback vol
+                
                 fallback[index] = [
-                    {"strike": 10.0 * 0.9, "volatility": 0.33, "delta": 0.25, "relative_strike": -10.0, "is_key_delta": True},
-                    {"strike": 10.0, "volatility": 0.30, "delta": 0.5, "relative_strike": 0.0, "is_key_delta": True},
-                    {"strike": 10.0 * 1.1, "volatility": 0.33, "delta": 0.75, "relative_strike": 10.0, "is_key_delta": True}
+                    self._create_vol_point(forward * 0.5, normal_vol * 1.1, forward, 0.25, option_type, time_to_maturity),
+                    self._create_vol_point(forward * 0.75, normal_vol * 1.05, forward, 0.4, option_type, time_to_maturity),
+                    self._create_vol_point(forward, normal_vol, forward, 0.5, option_type, time_to_maturity),
+                    self._create_vol_point(forward * 1.25, normal_vol * 1.05, forward, 0.6, option_type, time_to_maturity),
+                    self._create_vol_point(forward * 1.5, normal_vol * 1.1, forward, 0.75, option_type, time_to_maturity)
                 ]
             
             # Add a spread smile if needed
             if len(indices) > 1:
                 spread_name = f"{indices[0]}-{indices[1]}"
+                spread_forward = base_prices.get(spread_name, 1.0)
+                normal_vol = 0.25  # Default spread vol
+                
                 fallback[spread_name] = [
-                    {"strike": 1.0 * 0.5, "volatility": 0.36, "delta": 0.25, "relative_strike": -50.0, "is_key_delta": True},
-                    {"strike": 1.0, "volatility": 0.35, "delta": 0.5, "relative_strike": 0.0, "is_key_delta": True},
-                    {"strike": 1.0 * 1.5, "volatility": 0.36, "delta": 0.75, "relative_strike": 50.0, "is_key_delta": True}
+                    self._create_vol_point(spread_forward - abs(spread_forward), normal_vol * 1.1, spread_forward, 0.25, option_type, time_to_maturity),
+                    self._create_vol_point(spread_forward - abs(spread_forward) * 0.5, normal_vol * 1.05, spread_forward, 0.4, option_type, time_to_maturity),
+                    self._create_vol_point(spread_forward, normal_vol, spread_forward, 0.5, option_type, time_to_maturity),
+                    self._create_vol_point(spread_forward + abs(spread_forward) * 0.5, normal_vol * 1.05, spread_forward, 0.6, option_type, time_to_maturity),
+                    self._create_vol_point(spread_forward + abs(spread_forward), normal_vol * 1.1, spread_forward, 0.75, option_type, time_to_maturity)
                 ]
             
             return fallback
-
-
-class SpreadVolatilityModel:
-    """
-    Optimized class for modeling and forecasting spread volatility 
-    that reuses already fetched data
-    """
     
-    def __init__(self):
-        self.model = None
-        self.model_results = None
-        self.model_params = None
-        self.historical_data_cache = {}  # Cache for historical data
-        self.heston_params = {
-            "v0": 0.04,     # Initial variance
-            "kappa": 1.5,   # Mean reversion speed
-            "theta": 0.04,  # Long-run variance
-            "sigma": 0.3,   # Vol of vol
-            "rho": -0.7     # Correlation
-        }
-        
-    def get_volatility_from_historical_data(self, asset1_prices, asset2_prices, 
-                                        delivery_date, historical_length=365):
+    def generate_heston_smile(self, forward, base_vol, time_to_maturity, option_type, heston_params, center_strike=None):
         """
-        Calculate volatility from provided historical data with improved modeling
+        Generate volatility smile using the Heston model.
         
         Args:
-            asset1_prices (pd.Series): Historical prices for asset1
-            asset2_prices (pd.Series): Historical prices for asset2
-            delivery_date (datetime): Delivery date
-            historical_length (int): Days of historical data to use
+            forward: Forward price
+            base_vol: Base volatility (normal)
+            time_to_maturity: Time to maturity in years
+            option_type: "call" or "put"
+            heston_params: Heston model parameters
+            center_strike: Optional center strike
+            
+        Returns:
+            List of volatility points
+        """
+        # Safety checks
+        if forward == 0 or not np.isfinite(forward):
+            forward = 1.0
+        
+        # Ensure reasonable base_vol (0.01 to 0.5 in normal vol terms)
+        base_vol = min(max(0.01, base_vol), 0.5)
+        
+        # Default to forward if center_strike not provided
+        if center_strike is None or not np.isfinite(center_strike) or center_strike == 0:
+            center_strike = forward
+        
+        # Generate strikes around forward
+        strikes = self._generate_strike_range(forward, center_strike)
+        
+        # Create the smile
+        smile = []
+        
+        # Debug log
+        logger.debug(f"Generating Heston smile: forward={forward}, base_vol={base_vol}, time_to_maturity={time_to_maturity}")
+        logger.debug(f"Heston params: {heston_params}")
+        
+        for strike in strikes:
+            try:
+                # Calculate moneyness
+                moneyness = strike / forward if forward != 0 else 1.0
                 
-        Returns:
-            float: Estimated volatility for the spread
-        """
-        try:
-            # Handle single asset case
-            if asset2_prices is None or len(asset2_prices) == 0:
-                return self.estimate_volatility_from_spread_series(asset1_prices)
-            
-            # Debug: Check input data shapes and types
-            logger.debug(f"asset1_prices type: {type(asset1_prices)}, len: {len(asset1_prices)}")
-            logger.debug(f"asset2_prices type: {type(asset2_prices)}, len: {len(asset2_prices)}")
-            
-            # Ensure both are pandas Series with datetime index
-            if not isinstance(asset1_prices, pd.Series):
-                logger.warning("asset1_prices is not a pandas Series, converting...")
-                asset1_prices = pd.Series(asset1_prices)
+                # Calculate Heston implied volatility (as percentage vol)
+                percentage_vol = self.heston_implied_vol(moneyness, time_to_maturity, heston_params, option_type)
                 
-            if not isinstance(asset2_prices, pd.Series):
-                logger.warning("asset2_prices is not a pandas Series, converting...")
-                asset2_prices = pd.Series(asset2_prices)
-            
-            # Align the two series on the same dates
-            combined = pd.DataFrame({
-                'asset1': asset1_prices,
-                'asset2': asset2_prices
-            })
-            
-            # IMPORTANT FIX: Ensure the data is sorted by date index in descending order
-            # This ensures that 'most recent' actually means most recent chronologically
-            combined = combined.sort_index(ascending=False)
-            
-            # Debug: Print first few rows to verify data alignment and sorting
-            logger.debug(f"First 5 rows of combined data (after sorting):")
-            logger.debug(combined.head(5))
-            
-            # Drop any rows with missing values
-            combined_clean = combined.dropna()
-            logger.debug(f"After dropping NAs: {len(combined_clean)} rows")
-            
-            # Use last N days of data - now properly sorted by date
-            if len(combined_clean) > historical_length:
-                combined_clean = combined_clean.head(historical_length)  # Using head() now since index is descending
-                logger.debug(f"After limiting to most recent {historical_length} days: {len(combined_clean)} rows")
-            
-            # Check if we have enough data
-            if len(combined_clean) < 20:
-                logger.warning(f"Limited historical data ({len(combined_clean)} points). Using default volatility.")
-                return 0.3  # Default fallback for limited data
-            
-            # Calculate the spread between assets
-            spread_series = combined_clean['asset1'] - combined_clean['asset2']
-            
-            # Debug: Print spread statistics with date range
-            first_date = combined_clean.index.min().strftime('%Y-%m-%d')
-            last_date = combined_clean.index.max().strftime('%Y-%m-%d')
-            logger.debug(f"Spread series statistics ({first_date} to {last_date}):")
-            logger.debug(f"Mean: {spread_series.mean()}, Min: {spread_series.min()}, Max: {spread_series.max()}")
-            logger.debug(f"First 5 spread values (most recent first): {spread_series.head(5).tolist()}")
-            
-            # Get historical spread volatility with 20-day and 60-day windows
-            # Using the most recent data now due to proper sorting
-            vol_20d = self.estimate_volatility_from_spread_series(spread_series.head(min(20, len(spread_series))))
-            vol_60d = self.estimate_volatility_from_spread_series(spread_series.head(min(60, len(spread_series))))
-            
-            # Debug: Print raw volatility calculations
-            logger.debug(f"Raw vol_20d: {vol_20d}, Raw vol_60d: {vol_60d}")
-            
-            # Blend volatilities (more weight to recent data)
-            base_vol = 0.5 * vol_20d + 0.5 * vol_60d
-            
-            # Apply seasonal adjustment based on delivery month
-            delivery_month = delivery_date.month
-            seasonal_factor = 1.0
-            
-            # Typically winter months (Dec-Feb) have higher volatility
-            if delivery_month in [12, 1, 2]:
-                seasonal_factor = 1.2
-            # Shoulder months (Mar-Apr, Oct-Nov) have moderate volatility  
-            elif delivery_month in [3, 4, 10, 11]:
-                seasonal_factor = 1.1
-            # Summer months (May-Sep) have lower volatility
-            else:
-                seasonal_factor = 0.9
-            
-            # Calculate days to delivery and apply term structure adjustment
-            days_to_delivery = (delivery_date - datetime.now()).days
-            
-            if days_to_delivery > 0:
-                time_to_maturity = days_to_delivery / 365
-                vol = self.calculate_term_structure(base_vol, [time_to_maturity])[0]
+                # Convert to normal vol
+                normal_vol = percentage_vol * abs(forward)
                 
-                # Apply a reasonableness cap (don't let vol exceed 0.8 in absolute terms)
-                vol = min(vol, 0.8)
-            else:
-                vol = min(base_vol, 0.8)
-            
-            use_heston = True
-            if use_heston and days_to_delivery > 0:
-                spread_start = spread_series.iloc[0]
-                time_to_maturity = max(days_to_delivery / 365, 1 / 252)  # Avoid division by 0
-
-                # Show vols at surrounding levels to visualize the smile
-                logger.debug("Heston implied vol smile:")
-                for pct in [-0.1, -0.05, 0.0, 0.05, 0.1]:
-                    S_test = spread_start * (1 + pct)
-                    vol_test = self.simulate_heston_volatility(S0=S_test, T=time_to_maturity)
-                    logger.debug(f"  Spread: {S_test:.4f} ({pct:+.0%}), Implied Vol: {vol_test:.4f}")
-
-                # Use the base spread for final vol
-                heston_vol = self.simulate_heston_volatility(S0=spread_start, T=time_to_maturity)
-                logger.debug(f"Heston implied vol at current spread ({spread_start:.4f}): {heston_vol:.4f}")
-                vol = min(heston_vol, 0.8)
-
-            # Diagnostic prints
-            logger.info(f"Volatility calculation for delivery {delivery_date.strftime('%b-%Y')}:")
-            logger.info(f"  20-day vol: {vol_20d:.4f}")
-            logger.info(f"  60-day vol: {vol_60d:.4f}")
-            logger.info(f"  Base vol: {base_vol:.4f}")
-            logger.info(f"  Seasonal factor: {seasonal_factor:.2f}")
-            logger.info(f"  Days to delivery: {days_to_delivery}")
-            logger.info(f"  Final vol: {vol:.4f}")
-
-            return vol
-            
-        except Exception as e:
-            logger.error(f"Error calculating volatility from historical data: {e}")
-            import traceback
-            traceback.print_exc()
-            return 0.3  # Default fallback
+                # Cap normal vol at 0.5 (reasonable maximum)
+                normal_vol = min(normal_vol, 0.5)
+                
+                # Recalculate percentage vol for output
+                percentage_vol_display = (normal_vol / max(0.01, abs(forward))) * 100
+                
+                # Calculate delta for this strike
+                delta = self._calculate_bachelier_delta(forward, strike, time_to_maturity, normal_vol, option_type)
+                
+                # Determine if it's a key delta point
+                is_key_delta = False
+                for key_delta in [0.25, 0.5, 0.75]:
+                    if abs(delta - key_delta) < 0.05:
+                        is_key_delta = True
+                        break
+                
+                # Create the volatility point
+                smile.append({
+                    'strike': float(strike),
+                    'volatility': float(normal_vol),
+                    'percentage_vol': float(percentage_vol_display),
+                    'delta': float(delta),
+                    'relative_strike': float((strike / forward - 1) * 100) if forward != 0 else 0.0,
+                    'time_to_maturity': float(time_to_maturity),
+                    'is_key_delta': is_key_delta
+                })
+            except Exception as e:
+                logger.warning(f"Error calculating volatility for strike {strike}: {e}")
+                # Skip this strike point or add a fallback
+        
+        # Ensure we have points at key deltas
+        smile = self._ensure_key_delta_points(smile, forward, base_vol, time_to_maturity, option_type, heston_params)
+        
+        # Sort by strike
+        smile.sort(key=lambda x: x['strike'])
+        
+        return smile
     
-    def estimate_volatility_from_spread_series(self, spread_series, annualize=True):
+    def heston_implied_vol(self, moneyness, time_to_maturity, params, option_type="call"):
         """
-        Calculate volatility directly from spread time series
+        Calculate the implied volatility from the Heston model.
         
         Args:
-            spread_series (pd.Series): Time series of spread values
-            annualize (bool): Whether to annualize the volatility
+            moneyness: Strike / Forward
+            time_to_maturity: Time to maturity in years
+            params: Heston parameters
+            option_type: "call" or "put"
             
         Returns:
-            float: Estimated volatility
+            float: Implied volatility (as decimal, not percentage)
         """
-        # Debug: Print input
-        logger.debug(f"estimate_volatility input: {len(spread_series)} points")
+        # Ensure moneyness is valid and positive
+        if moneyness <= 0 or not np.isfinite(moneyness):
+            # For invalid moneyness, return a reasonable fallback
+            return 0.25  # Default reasonable volatility
         
-        # IMPORTANT FIX: Ensure data is sorted chronologically for proper differencing
-        # For proper price changes, we need to calculate day-to-day changes
-        # This requires chronological ordering (ascending by date)
-        spread_series_chrono = spread_series.sort_index()
+        # Extract parameters with safety checks
+        v0 = min(params.get("v0", 0.04), 0.09)  # Cap at 0.09 (30% vol)
+        kappa = max(params.get("kappa", 1.5), 0.5)
+        theta = min(params.get("theta", 0.04), 0.09)  # Cap at 0.09 (30% vol)
+        sigma = min(params.get("sigma", 0.3), 0.5)  # Cap vol of vol
+        rho = max(min(params.get("rho", -0.7), 0.8), -0.8)  # Keep in [-0.8, 0.8]
         
-        # For Bachelier model, use absolute changes
-        spread_changes = spread_series_chrono.diff().dropna()
+        # Calculate log-moneyness with safety check
+        log_moneyness = np.log(max(moneyness, 0.01))
         
-        # Debug: Print changes
-        logger.debug(f"First 5 spread changes: {spread_changes.head(5).tolist()}")
-        logger.debug(f"Spread changes stats: Mean={spread_changes.mean()}, Std={spread_changes.std()}")
+        # Apply simplified Heston smile approximation based on moment matching
+        # This is a 2nd order approximation based on expansion of the characteristic function
         
-        # Calculate volatility (standard deviation of changes)
-        vol = spread_changes.std()
+        # First moment (skew) - with limits to prevent extreme values
+        skew_term = rho * sigma * v0 * time_to_maturity / max(kappa, 0.1)
+        skew_term = max(-0.2, min(skew_term, 0.2))  # Limit skew effect
         
-        # Annualize if requested (assuming 252 trading days)
-        if annualize:
-            vol = vol * np.sqrt(252)
+        # Second moment (curvature) - simplified approximation
+        curvature_term = (1 - rho**2) * sigma**2 * v0 * time_to_maturity / (2 * max(kappa**2, 0.1))
+        curvature_term = max(0, min(curvature_term, 0.1))  # Limit curvature effect
         
-        # IMPORTANT FIX: Return the volatility as a decimal, not a percentage
-        vol = vol / 100.0  # Convert from percentage to decimal
+        # Apply the approximation
+        atm_vol = np.sqrt(v0)  # ATM vol
         
-        logger.debug(f"Calculated volatility: {vol}")
+        # Quadratic adjustment to vol based on log-moneyness
+        adjustment = 1 + skew_term * log_moneyness + curvature_term * log_moneyness**2
+        adjustment = max(0.5, min(adjustment, 1.5))  # Limit adjustment to [0.5, 1.5]
         
-        return vol
-    
-    def calculate_term_structure(self, base_vol, maturities, mean_reversion=0.5):
-        """
-        Calculate the term structure of volatility
+        implied_vol = atm_vol * adjustment
         
-        Args:
-            base_vol (float): Base volatility (annualized)
-            maturities (list): List of maturities in years
-            mean_reversion (float): Mean reversion rate
-            
-        Returns:
-            np.array: Term structure of volatilities
-        """
-        vol_term = []
+        # Ensure the vol is positive and within reasonable bounds (max 40% as percentage vol)
+        implied_vol = max(0.01, min(implied_vol, 0.4))
         
-        for T in maturities:
-            if T <= 0:
-                vol_term.append(base_vol)
-            else:
-                # Calculate term structure with mean reversion
-                term_factor = np.sqrt((1 - np.exp(-2 * mean_reversion * T)) / (2 * mean_reversion * T))
-                vol_term.append(base_vol * term_factor)
-        
-        return np.array(vol_term)
-    
-    def simulate_heston_volatility(self, S0, T, steps=252, n_paths=1000):
-        """
-        Simulates Heston model paths and returns the implied volatility
-        
-        Args:
-            S0 (float): Initial spread value
-            T (float): Time to maturity in years
-            steps (int): Time steps per year
-            n_paths (int): Number of Monte Carlo paths
-        
-        Returns:
-            float: Implied volatility (standard deviation of log returns)
-        """
-        dt = T / steps
-        v0 = self.heston_params["v0"]
-        kappa = self.heston_params["kappa"]
-        theta = self.heston_params["theta"]
-        sigma = self.heston_params["sigma"]
-        rho = self.heston_params["rho"]
-        
-        v = np.full((n_paths,), v0)
-        S = np.full((n_paths,), S0)
-
-        for _ in range(steps):
-            z1 = np.random.normal(size=n_paths)
-            z2 = np.random.normal(size=n_paths)
-            dw1 = z1
-            dw2 = rho * z1 + np.sqrt(1 - rho**2) * z2
-
-            v = np.abs(v + kappa * (theta - v) * dt + sigma * np.sqrt(v * dt) * dw2)
-            S = S * np.exp(-0.5 * v * dt + np.sqrt(v * dt) * dw1)
-        
-        log_returns = np.log(S / S0)
-        implied_vol = np.std(log_returns) / np.sqrt(T)
+        # Debug log
+        logger.debug(f"Heston vol calculation: moneyness={moneyness}, T={time_to_maturity}, " 
+                    f"params={params}, result={implied_vol}")
         
         return implied_vol
+
+    
+    def _generate_strike_range(self, forward, center_strike):
+        """
+        Generate a reasonable range of strikes centered around forward and strike.
+        
+        Args:
+            forward: Forward price
+            center_strike: Center strike (option strike or forward)
+            
+        Returns:
+            List of strike prices
+        """
+        # Safety check
+        if forward == 0:
+            forward = 1.0
+        
+        # Determine if this is a spread (smaller absolute value)
+        is_spread = abs(forward) < 2.0
+        
+        if is_spread:
+            # For spreads: use ±100% range
+            min_strike = forward - abs(forward)
+            max_strike = forward + abs(forward)
+            
+            # If close to zero, ensure we cross zero
+            if forward > 0 and min_strike > -0.1:
+                min_strike = -0.1
+            elif forward < 0 and max_strike < 0.1:
+                max_strike = 0.1
+                
+            # Always include the option strike
+            if center_strike < min_strike:
+                min_strike = center_strike * 0.9
+            elif center_strike > max_strike:
+                max_strike = center_strike * 1.1
+        else:
+            # For indices: use ±50% range
+            min_strike = forward * 0.5
+            max_strike = forward * 1.5
+            
+            # Always include the option strike
+            if center_strike < min_strike:
+                min_strike = center_strike * 0.9
+            elif center_strike > max_strike:
+                max_strike = center_strike * 1.1
+        
+        # Generate 15 points including forward and center_strike
+        num_points = 15
+        
+        # Create base linspace
+        if min_strike == max_strike:
+            # Edge case, single point
+            base_strikes = np.array([min_strike])
+        else:
+            base_strikes = np.linspace(min_strike, max_strike, num_points)
+        
+        # Add forward and center_strike
+        all_strikes = np.append(base_strikes, [forward, center_strike])
+        
+        # Sort and remove duplicates
+        strikes = np.sort(np.unique(all_strikes))
+        
+        return strikes
+    
+    def _calculate_bachelier_delta(self, forward, strike, time_to_maturity, vol, option_type):
+        """
+        Calculate option delta using Bachelier model.
+        
+        Args:
+            forward: Forward price
+            strike: Strike price
+            time_to_maturity: Time to maturity in years
+            vol: Volatility
+            option_type: "call" or "put"
+            
+        Returns:
+            float: Delta value
+        """
+        # Avoid division by zero
+        if vol <= 0 or time_to_maturity <= 0:
+            # For at-the-money options
+            if abs(forward - strike) < 0.0001:
+                return 0.5
+            # For in-the-money calls
+            elif forward > strike and option_type.lower() == 'call':
+                return 1.0
+            # For in-the-money puts
+            elif forward < strike and option_type.lower() == 'put':
+                return -1.0
+            # For out-of-money calls
+            elif forward < strike and option_type.lower() == 'call':
+                return 0.0
+            # For out-of-money puts
+            else:
+                return 0.0
+        
+        # Calculate d term for Bachelier model
+        d = (forward - strike) / (vol * np.sqrt(time_to_maturity))
+        
+        # Calculate delta
+        if option_type.lower() == 'call':
+            delta = norm.cdf(d)
+        else:  # put
+            delta = norm.cdf(d) - 1
+        
+        return delta
+    
+    def _ensure_key_delta_points(self, smile, forward, base_vol, time_to_maturity, option_type, heston_params=None):
+            """
+            Ensure that the smile contains points at key delta levels (0.25, 0.5, 0.75).
+            
+            Args:
+                smile: Current smile
+                forward: Forward price
+                base_vol: Base volatility
+                time_to_maturity: Time to maturity
+                option_type: "call" or "put"
+                heston_params: Optional Heston parameters
+                
+            Returns:
+                Updated smile with key delta points
+            """
+            # Extract existing deltas
+            existing_deltas = [point['delta'] for point in smile]
+            
+            # Key delta values to ensure
+            key_deltas = [0.25, 0.5, 0.75]
+            
+            # Find which key deltas are missing
+            missing_deltas = []
+            for key_delta in key_deltas:
+                if not any(abs(delta - key_delta) < 0.05 for delta in existing_deltas):
+                    missing_deltas.append(key_delta)
+            
+            # If we have all key deltas, return the original smile
+            if not missing_deltas:
+                return smile
+            
+            # Calculate strikes for missing key deltas
+            for delta_target in missing_deltas:
+                # Invert the delta function to find the corresponding strike
+                strike = self._find_strike_for_delta(delta_target, forward, base_vol, time_to_maturity, option_type)
+                
+                # Calculate volatility at this strike using Heston model if available
+                if heston_params:
+                    moneyness = strike / forward if forward != 0 else 1.0
+                    try:
+                        percentage_vol = self.heston_implied_vol(moneyness, time_to_maturity, heston_params, option_type)
+                    except Exception:
+                        # Fallback to simple smile approximation
+                        moneyness_shift = moneyness - 1
+                        percentage_vol = np.sqrt(heston_params['v0']) * (1 + 0.2 * moneyness_shift**2)
+                else:
+                    # Simple approximation if Heston params not available
+                    moneyness = strike / forward - 1 if forward != 0 else 0
+                    vol_adjustment = 1.0 + 0.2 * moneyness**2
+                    percentage_vol = base_vol * vol_adjustment / max(0.01, abs(forward))
+                
+                # Convert to normal vol
+                normal_vol = percentage_vol * abs(forward)
+                normal_vol = min(max(0.01, normal_vol), 1.0)  # Reasonable bounds
+                
+                # Calculate percentage vol for output
+                percentage_vol_output = (normal_vol / max(0.01, abs(forward))) * 100
+                
+                # Add the new point
+                new_point = {
+                    'strike': float(strike),
+                    'volatility': float(normal_vol),
+                    'percentage_vol': float(percentage_vol_output),
+                    'delta': float(delta_target),
+                    'relative_strike': float((strike / forward - 1) * 100) if forward != 0 else 0.0,
+                    'time_to_maturity': float(time_to_maturity),
+                    'is_key_delta': True
+                }
+                
+                smile.append(new_point)
+            
+            # Re-sort the smile by strike
+            smile.sort(key=lambda x: x['strike'])
+            
+            return smile
+    
+    def _find_strike_for_delta(self, target_delta, forward, vol, time_to_maturity, option_type):
+        """
+        Find the strike that gives a specific delta.
+        
+        Args:
+            target_delta: Target delta value
+            forward: Forward price
+            vol: Volatility
+            time_to_maturity: Time to maturity
+            option_type: "call" or "put"
+            
+        Returns:
+            float: Strike price
+        """
+        # For Bachelier model, we can invert the delta formula directly
+        
+        # Adjust target delta for put options
+        if option_type.lower() == 'put':
+            effective_delta = target_delta + 1
+        else:
+            effective_delta = target_delta
+        
+        # Safety checks
+        if not (0 <= effective_delta <= 1):
+            effective_delta = max(0, min(1, effective_delta))
+        
+        # Invert the normal CDF to get the d value
+        d = norm.ppf(effective_delta)
+        
+        # Solve for strike
+        if time_to_maturity <= 0 or vol <= 0:
+            # Edge case
+            if effective_delta >= 0.5:
+                strike = forward * 0.9  # ITM
+            else:
+                strike = forward * 1.1  # OTM
+        else:
+            strike = forward - d * vol * np.sqrt(time_to_maturity)
+        
+        return strike
+    
+    def _create_vol_point(self, strike, normal_vol, forward, delta, option_type, time_to_maturity):
+        """
+        Create a complete volatility point with all required fields.
+        
+        Args:
+            strike: Strike price
+            normal_vol: Normal volatility
+            forward: Forward price
+            delta: Delta value
+            option_type: "call" or "put"
+            time_to_maturity: Time to maturity in years
+            
+        Returns:
+            Dict: Complete volatility point
+        """
+        # Calculate percentage volatility
+        percentage_vol = (normal_vol / max(0.01, abs(forward))) * 100
+        
+        # Calculate relative strike (as percentage of forward)
+        relative_strike = (strike / forward - 1) * 100 if forward != 0 else 0
+        
+        # Check if this is a key delta point
+        is_key_delta = delta in [0.25, 0.5, 0.75]
+        
+        return {
+            'strike': float(strike),
+            'volatility': float(normal_vol),
+            'percentage_vol': float(percentage_vol),
+            'delta': float(delta),
+            'relative_strike': float(relative_strike),
+            'time_to_maturity': float(time_to_maturity),
+            'is_key_delta': is_key_delta
+        }

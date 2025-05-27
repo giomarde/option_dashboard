@@ -102,12 +102,6 @@ class OptionProcessor:
         indices = [primary_index]
         if secondary_index and secondary_index != primary_index:
             indices.append(secondary_index)
-            
-        # Add basket indices if applicable
-        basket_indices = config.get('basket_indices', [])
-        for idx in basket_indices:
-            if idx not in indices:
-                indices.append(idx)
         
         # Parse evaluation date
         if isinstance(evaluation_date_str, str):
@@ -118,28 +112,44 @@ class OptionProcessor:
         # Calculate delivery dates
         delivery_dates = self._calculate_delivery_dates(config)
         
+        # Calculate decision date (the option expiry)
+        first_delivery_date = delivery_dates[0] if delivery_dates else evaluation_date
+        decision_days_prior = config.get('decision_days_prior', 0)
+        decision_date = first_delivery_date - timedelta(days=decision_days_prior)
+        
+        # Calculate time to maturity in years from pricing date to decision date
+        days_to_decision = max(1, (decision_date - pricing_date).days)
+        time_to_maturity = days_to_decision / 365.0
+        
+        logger.info(f"Pricing date: {pricing_date_str}")
+        logger.info(f"Delivery date: {first_delivery_date}")
+        logger.info(f"Decision date: {decision_date}")
+        logger.info(f"Time to maturity: {time_to_maturity} years ({days_to_decision} days)")
+        
         # Initialize result structure
         market_data = {
             'evaluation_date': evaluation_date,
             'pricing_date': pricing_date,
             'delivery_dates': delivery_dates,
+            'decision_date': decision_date,
+            'time_to_maturity': time_to_maturity,
             'indices_data': {},
             'forward_curves': {},
             'volatilities': {},
             'forward_spreads': [],
-            'spread_volatilities': []  # Ensure this is initialized
+            'spread_volatilities': []
         }
         
         # Fetch data for each index if data provider is available
         if self.data_provider:
             for index in indices:
                 try:
-                    # 1. Get current price data
+                    # Get current price data
                     current_data = self.data_provider.fetch_market_data(
                         index, pricing_date_str)
                     market_data['indices_data'][index] = current_data
                     
-                    # 2. Get forward curve
+                    # Get forward curve
                     forward_curve = self.data_provider.fetch_forward_curve(
                         index, 12, pricing_date_str)
                     market_data['forward_curves'][index] = forward_curve
@@ -182,159 +192,157 @@ class OptionProcessor:
                 # Calculate spread and round to 4 decimal places
                 spread = round(primary_price - secondary_price, 4)
                 market_data['forward_spreads'].append(spread)
+                
+                logger.info(f"Forward prices for month {month_code}: {primary_index}={primary_price}, {secondary_index}={secondary_price}, spread={spread}")
         
-        # Calculate volatilities separately from data loading
+        # Calculate the strike price
+        strike = config.get('secondary_differential', 0) - config.get('primary_differential', 0) + config.get('total_cost_per_option', 0)
+        strike = round(strike, 4)  # Round to 4 decimal places
+        logger.info(f"Calculated strike price: {strike}")
+        
+        # Calculate volatilities
         try:
-            # Initialize vol_surface as empty dict first to avoid unbound variable error
-            vol_surface = {}
-            
             from models.volatility import VolatilityModel
             vol_model = VolatilityModel(self.data_provider)
             
-            # For spread options, we need volatility for the spread and both legs
-            if delivery_dates:
-                # Initialize with default volatilities
-                market_data['spread_volatilities'] = [0.35] * len(delivery_dates)
+            # Prepare base prices and option strikes
+            base_prices = {idx: data.get('price', 10.0) for idx, data in market_data['indices_data'].items()}
+            logger.info(f"Base prices for volatility calculation: {base_prices}")
+            
+            # Add spread price
+            if primary_index and secondary_index and primary_index in base_prices and secondary_index in base_prices:
+                spread_key = f"{primary_index}-{secondary_index}"
+                base_prices[spread_key] = round(base_prices[primary_index] - base_prices[secondary_index], 4)
+                logger.info(f"Added spread price {spread_key}: {base_prices[spread_key]}")
+            
+            # Prepare option strikes dictionary
+            option_strikes = {}
+            if primary_index and secondary_index:
+                spread_key = f"{primary_index}-{secondary_index}"
+                option_strikes[spread_key] = strike
+            
+            # Generate volatility surfaces
+            logger.info(f"Generating volatility surface with time_to_maturity: {time_to_maturity}")
+            vol_surface = vol_model.get_volatility_surface(
+                indices=indices,
+                evaluation_date=pricing_date,
+                delivery_date=decision_date,
+                base_prices=base_prices,
+                option_strikes=option_strikes,
+                option_type=option_type,
+                time_to_maturity=time_to_maturity
+            )
+            
+            # Store volatility surface
+            market_data['volatilities'] = vol_surface
+            logger.info(f"Volatility surface generated with keys: {list(vol_surface.keys())}")
+            
+            # Extract volatility for spread
+            if primary_index and secondary_index:
+                spread_key = f"{primary_index}-{secondary_index}"
                 
-                try:
-                    # Add detailed debugging information
-                    logger.info(f"Generating volatility surface for indices: {indices}")
-                    logger.info(f"Using evaluation date: {evaluation_date}")
-                    logger.info(f"First delivery date: {delivery_dates[0]}")
+                if spread_key in vol_surface and vol_surface[spread_key]:
+                    # Log sample of volatility smile
+                    logger.info(f"Spread volatility data sample: {vol_surface[spread_key][:2]}...")
                     
-                    # Log the prices being used
-                    base_prices = {idx: data.get('price', 10.0) for idx, data in market_data['indices_data'].items()}
-                    logger.info(f"Base prices for volatility calculation: {base_prices}")
-                    
-                    # Calculate the strike price
-                    strike = config.get('secondary_differential', 0) - config.get('primary_differential', 0) + config.get('total_cost_per_option', 0)
-                    strike = round(strike, 4)  # Round to 4 decimal places
-
-                    # Prepare option strikes dictionary for volatility model
-                    option_strikes = {}
-                    if primary_index and secondary_index:
-                        spread_key = f"{primary_index}-{secondary_index}"
-                        option_strikes[spread_key] = strike
+                    # Find volatility for the strike
+                    if market_data['forward_spreads']:
+                        spread_val = market_data['forward_spreads'][0]
+                        logger.info(f"Forward spread value: {spread_val}")
+                        logger.info(f"Strike value: {strike}")
                         
-                        # Add spread to base_prices if not already there
-                        if spread_key not in base_prices and primary_index in base_prices and secondary_index in base_prices:
-                            base_prices[spread_key] = round(base_prices[primary_index] - base_prices[secondary_index], 4)
-
-                    # Generate volatility surfaces for all indices and the spread with option_type
-                    vol_surface = vol_model.get_volatility_surface(
-                        indices, evaluation_date, delivery_dates[0], base_prices, option_strikes, option_type
-                    )
-                    
-                    # Now we can safely log the volatility surface keys
-                    logger.info(f"Volatility surface keys: {list(vol_surface.keys() if vol_surface else [])}")
-                    
-                    market_data['volatilities'] = vol_surface
+                        # Find the volatility point closest to the strike
+                        strike_vol_point = None
                         
-                    # Extract volatilities for each delivery date
-                    if primary_index and secondary_index:
-                        spread_key = f"{primary_index}-{secondary_index}"
-                        logger.info(f"Looking for spread volatility with key: {spread_key}")
+                        # Try to find exact match first
+                        for vol_point in vol_surface[spread_key]:
+                            if abs(vol_point['strike'] - strike) < 0.0001:  # Nearly exact match
+                                strike_vol_point = vol_point
+                                break
                         
-                    if spread_key in vol_surface and vol_surface[spread_key]:
-                        # Log the spread volatility structure
-                        logger.info(f"Spread volatility data: {vol_surface[spread_key][:2]}...")
+                        # If no exact match, find closest point
+                        if not strike_vol_point:
+                            logger.info("No exact strike match found, finding closest point")
+                            strike_vol_point = min(vol_surface[spread_key], key=lambda p: abs(p['strike'] - strike))
                         
-                        # Find volatility for the strike
-                        if market_data['forward_spreads']:
-                            spread_val = market_data['forward_spreads'][0]
-                            logger.info(f"Forward spread value: {spread_val}")
-                            logger.info(f"Strike value: {strike}")
-                            
-                            # Find the exact strike volatility point - must be present due to our generate_volatility_smile implementation
-                            strike_vol_point = None
-                            for vol_point in vol_surface[spread_key]:
-                                if abs(vol_point['strike'] - strike) < 0.0001:  # Nearly exact match
-                                    strike_vol_point = vol_point
-                                    break
-                            
-                            if not strike_vol_point:
-                                logger.warning(f"No volatility point found at strike {strike}. This should not happen with proper smile generation!")
-                                # Fallback to closest point
-                                closest_point = min(vol_surface[spread_key], key=lambda p: abs(p['strike'] - strike))
-                                strike_vol_point = closest_point
-                            
-                            # Get volatility at the strike
-                            closest_vol = strike_vol_point['volatility']
-                            closest_strike = strike_vol_point['strike']
-                            closest_delta = strike_vol_point.get('delta', 0.5)  # Default to 0.5 if not available
-
-                            logger.info(f"Found volatility {closest_vol} at strike {closest_strike} (delta: {closest_delta})")
-                            market_data['spread_volatilities'] = [round(closest_vol, 4)] * len(delivery_dates)
-
-                            # Store annualized normal volatility for displaying in UI
-                            market_data['annualized_normal'] = round(closest_vol, 4)
-
-                            # Calculate percentage volatility (normal vol / price) correctly
-                            # Use absolute value of spread to avoid negative percentage volatilities
-                            if abs(spread_val) > 0.001:  # Avoid division by very small numbers
-                                percentage_vol = (closest_vol / abs(spread_val)) * 100
-                                market_data['percentage_vol'] = round(percentage_vol, 2)
-                                logger.info(f"Percentage vol = {closest_vol} / {abs(spread_val)} * 100 = {percentage_vol}%")
-                            else:
-                                # Fallback if spread is very close to zero
-                                market_data['percentage_vol'] = round(closest_vol * 100, 2)
-                                logger.info(f"Using direct percentage vol due to small spread: {market_data['percentage_vol']}%")
+                        # Get volatility at the strike
+                        closest_vol = strike_vol_point['volatility']
+                        closest_strike = strike_vol_point['strike']
+                        closest_delta = strike_vol_point.get('delta', 0.5)  # Default to 0.5 if not available
+                        
+                        logger.info(f"Found volatility point: {strike_vol_point}")
+                        
+                        # Ensure volatility is reasonable
+                        closest_vol = max(0.01, min(closest_vol, 0.5))  # Cap at 0.5
+                        
+                        # Store volatility for all delivery dates
+                        market_data['spread_volatilities'] = [round(closest_vol, 4)] * len(delivery_dates)
+                        market_data['annualized_normal'] = round(closest_vol, 4)
+                        
+                        # Get percentage vol from the volatility point if available
+                        if 'percentage_vol' in strike_vol_point:
+                            market_data['percentage_vol'] = round(strike_vol_point['percentage_vol'], 2)
+                            logger.info(f"Using percentage vol from point: {market_data['percentage_vol']}%")
                         else:
-                            # If no forward spreads, use the ATM volatility
-                            atm_points = [p for p in vol_surface[spread_key] if abs(p.get('delta', 0) - 0.5) < 0.1]
-                            if atm_points:
-                                atm_vol = atm_points[0]['volatility']
-                            else:
-                                # Fallback to middle point
-                                middle_idx = len(vol_surface[spread_key]) // 2
-                                atm_vol = vol_surface[spread_key][middle_idx]['volatility']
-                                
-                            logger.info(f"Using ATM volatility: {atm_vol}")
-                            market_data['spread_volatilities'] = [round(atm_vol, 4)] * len(delivery_dates)
-                            market_data['annualized_normal'] = round(atm_vol, 4)
-                            market_data['percentage_vol'] = round(atm_vol * 100, 2)  # Default percent
+                            # Calculate percentage vol
+                            percentage_vol = (closest_vol / max(0.01, abs(spread_val))) * 100
+                            market_data['percentage_vol'] = round(percentage_vol, 2)
+                            logger.info(f"Calculated percentage vol: {closest_vol} / {max(0.01, abs(spread_val))} * 100 = {percentage_vol}%")
                     else:
-                        logger.warning(f"Spread key {spread_key} not found in volatility surface")
-                except Exception as e:
-                    logger.error(f"Error generating volatility surface: {e}")
-                    import traceback
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-                    # Fallback to default volatilities already initialized
+                        # No forward spreads available, use default ATM volatility
+                        logger.warning("No forward spreads available, using ATM volatility")
+                        atm_points = [p for p in vol_surface[spread_key] if abs(p.get('delta', 0) - 0.5) < 0.1]
+                        
+                        if atm_points:
+                            atm_point = atm_points[0]
+                            atm_vol = atm_point['volatility']
+                            percentage_vol = atm_point.get('percentage_vol', atm_vol * 100)
+                        else:
+                            # Fallback to middle point
+                            middle_idx = len(vol_surface[spread_key]) // 2
+                            middle_point = vol_surface[spread_key][middle_idx]
+                            atm_vol = middle_point['volatility']
+                            percentage_vol = middle_point.get('percentage_vol', atm_vol * 100)
+                        
+                        # Ensure volatility is reasonable
+                        atm_vol = max(0.01, min(atm_vol, 0.5))
+                        
+                        market_data['spread_volatilities'] = [round(atm_vol, 4)] * len(delivery_dates)
+                        market_data['annualized_normal'] = round(atm_vol, 4)
+                        market_data['percentage_vol'] = round(percentage_vol, 2)
+                        logger.info(f"Using ATM volatility: {atm_vol} ({percentage_vol}%)")
+                else:
+                    # Spread key not found in volatility surface
+                    logger.warning(f"Spread key {spread_key} not found in volatility surface, using default volatility")
+                    market_data['spread_volatilities'] = [0.35] * len(delivery_dates)
+                    market_data['annualized_normal'] = 0.35
+                    market_data['percentage_vol'] = 35.0
         except Exception as e:
-            logger.error(f"Major error in volatility calculation: {e}")
+            logger.error(f"Error calculating volatilities: {e}")
             import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            # Ensure we have default volatilities
+            logger.error(traceback.format_exc())
+            
+            # Use default volatilities
             market_data['volatilities'] = {}
             market_data['spread_volatilities'] = [0.35] * len(delivery_dates)
             market_data['annualized_normal'] = 0.35
             market_data['percentage_vol'] = 35.0
-            
-            # Add placeholder volatility smiles
-            for index in indices:
-                base_price = market_data['indices_data'][index].get('price', 10.0)
-                market_data['volatilities'][index] = [
-                    {"strike": base_price * 0.9, "volatility": 0.33, "delta": 0.25, "relative_strike": -10.0, "is_key_delta": True},
-                    {"strike": base_price * 0.95, "volatility": 0.31, "delta": 0.4, "relative_strike": -5.0, "is_key_delta": False},
-                    {"strike": base_price, "volatility": 0.30, "delta": 0.5, "relative_strike": 0.0, "is_key_delta": True},
-                    {"strike": base_price * 1.05, "volatility": 0.31, "delta": 0.6, "relative_strike": 5.0, "is_key_delta": False},
-                    {"strike": base_price * 1.1, "volatility": 0.33, "delta": 0.75, "relative_strike": 10.0, "is_key_delta": True}
-                ]
-            
-            if primary_index and secondary_index:
-                spread_key = f"{primary_index}-{secondary_index}"
-                spread_val = 1.0
-                if market_data['forward_spreads']:
-                    spread_val = market_data['forward_spreads'][0]
-                    
-                # Use absolute values for spread
-                market_data['volatilities'][spread_key] = [
-                    {"strike": spread_val - 0.5, "volatility": 0.38, "delta": 0.25, "relative_strike": -50.0, "is_key_delta": True},
-                    {"strike": spread_val - 0.25, "volatility": 0.36, "delta": 0.4, "relative_strike": -25.0, "is_key_delta": False},
-                    {"strike": spread_val, "volatility": 0.35, "delta": 0.5, "relative_strike": 0.0, "is_key_delta": True},
-                    {"strike": spread_val + 0.25, "volatility": 0.36, "delta": 0.6, "relative_strike": 25.0, "is_key_delta": False},
-                    {"strike": spread_val + 0.5, "volatility": 0.38, "delta": 0.75, "relative_strike": 50.0, "is_key_delta": True}
-                ]
+        
+        # Final validation to ensure we have all required data
+        if not market_data['spread_volatilities'] and delivery_dates:
+            logger.warning("No spread volatilities calculated, using default")
+            market_data['spread_volatilities'] = [0.35] * len(delivery_dates)
+        
+        if 'annualized_normal' not in market_data:
+            logger.warning("No annualized normal volatility calculated, using default")
+            market_data['annualized_normal'] = 0.35
+        
+        if 'percentage_vol' not in market_data:
+            logger.warning("No percentage volatility calculated, using default")
+            market_data['percentage_vol'] = 35.0
+        
+        # Log final volatility values for validation
+        logger.info(f"Final volatility values: normal={market_data['annualized_normal']}, percentage={market_data['percentage_vol']}%")
         
         return market_data
     
