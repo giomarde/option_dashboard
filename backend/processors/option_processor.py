@@ -492,8 +492,8 @@ class OptionProcessor:
         return get_pricing_model(config_copy)
     
     def _post_process_results(self, results: Dict[str, any], 
-                             config: Dict[str, any], 
-                             market_data: Dict[str, any]) -> Dict[str, any]:
+                            config: Dict[str, any], 
+                            market_data: Dict[str, any]) -> Dict[str, any]:
         """
         Post-process pricing results for additional information.
         
@@ -517,7 +517,7 @@ class OptionProcessor:
             'forward_spreads': market_data.get('forward_spreads', []),
         }
         
-        # Add volatility smiles for visualization - now with delta values
+        # Add volatility smiles for visualization
         if 'volatilities' in market_data:
             enhanced['volatility_smiles'] = market_data['volatilities']
         
@@ -538,10 +538,33 @@ class OptionProcessor:
             'num_options': config.get('num_options', 1)
         }
         
-        # Add normal and percentage volatility values
+        # Add normal volatility value from market data
         if 'annualized_normal' in market_data:
             enhanced['annualized_normal'] = market_data['annualized_normal']
-        if 'percentage_vol' in market_data:
+        
+        # Calculate percentage volatility - COMPLETELY HANDLED ON BACKEND
+        if 'forward_spreads' in market_data and market_data['forward_spreads'] and 'annualized_normal' in market_data:
+            spread_value = abs(market_data['forward_spreads'][0])
+            normal_vol = market_data['annualized_normal']
+            
+            if spread_value > 0.001:
+                # Calculate percentage vol as (normal_vol / abs(spread)) * 100
+                percentage_vol = (normal_vol / spread_value) * 100
+            else:
+                # Fallback for very small spreads
+                percentage_vol = normal_vol * 100
+            
+            # Round to 2 decimal places for display
+            enhanced['percentage_vol'] = round(percentage_vol, 2)
+            
+            # Add calculation details for debugging
+            enhanced['vol_calculation'] = {
+                'normal_vol': normal_vol,
+                'spread_value': spread_value,
+                'formula': f"{normal_vol} / {spread_value} * 100 = {percentage_vol}"
+            }
+        elif 'percentage_vol' in market_data:
+            # Use pre-calculated value if available
             enhanced['percentage_vol'] = market_data['percentage_vol']
         
         return enhanced
